@@ -1,0 +1,16 @@
+# Financial AI Agent — Phase 1 dependencies
+# Install with: pip install -r requirements.txt
+ 
+# Data processing
+polars==1.40.1          # DataFrame engine for ingestion (wide/tall layout extraction)
+openpyxl==3.1.5         # Excel (.xlsx) file reading backend for Polars
+ 
+# Database
+duckdb==1.5.2           # Local OLAP SQL database for staging + live facts
+ 
+# Validation
+pydantic==2.13.3        # Data models and validation (used in Phase 3 tool layer)
+
+# Data output
+pandas==2.2.0           # For dataframe manipulation and DuckDB .df() results
+numpy==1.26.4
