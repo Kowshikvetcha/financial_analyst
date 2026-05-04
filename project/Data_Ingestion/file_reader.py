@@ -313,6 +313,19 @@ def _parse_numeric_value(raw_val) -> Optional[float]:
         return None
 
 
+_ROW_UNIT_RE = re.compile(r"\b(rs\.?|inr|usd)?\s*(crore|crores|cr\.?|lakh|lakhs|lacs|million|mn|thousand|000)\b", re.I)
+
+
+def _row_level_unit_override(label: str) -> Optional[str]:
+    m = _ROW_UNIT_RE.search(label or "")
+    if not m:
+        return None
+    token = m.group(0).lower()
+    if "usd" in token:
+        return f"USD {token}"
+    return f"INR {token}"
+
+
 def _get_cell_reference(col_idx: int, row_idx: int) -> str:
     """Convert 1-based indices to Excel-style cell reference (e.g., B5)."""
     # Excel column names: A, B, ..., Z, AA, AB, ...
@@ -377,7 +390,9 @@ def extract_wide(
             if numeric_val is None:
                 continue
 
-            nv = normalise(numeric_val, unit_spec_str)
+            row_unit = _row_level_unit_override(raw_label)
+            effective_unit = row_unit if row_unit else unit_spec_str
+            nv = normalise(numeric_val, effective_unit)
             # Cell ref: period col (1-based frame index) + skip_rows offset
             # col_idx starts at 0 for period_cols[0] at df.columns[1] = B
             cell_ref = _get_cell_reference(col_idx + 2, row_idx + 1 + skip_rows)

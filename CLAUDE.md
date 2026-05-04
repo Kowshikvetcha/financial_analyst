@@ -1,6 +1,6 @@
 # CLAUDE.md — Deterministic Financial AI Co-Pilot
 
-> Always update this file, `docs/file_reference.md`, and `PROGRESS.md` at the end of every turn where code changes were made.
+> Always update this file, `README.md`, `docs/file_reference.md`, and `PROGRESS.md` at the end of every turn where code changes were made.
 
 ## What This Project Is
 
@@ -10,7 +10,7 @@ A local-first, zero-hallucination financial intelligence system for Private Equi
 
 ## Project Status
 
-Phase 1 (quantitative ingestion pipeline) is complete. Phases 2–5 have not been started.
+Phase 1 (quantitative ingestion pipeline) is complete. Phase 2 (qualitative pipeline) is implemented and integrated. Phases 3–5 are in progress.
 
 See [`docs/file_reference.md`](docs/file_reference.md) for a detailed breakdown of every file.
 See [`PROGRESS.md`](PROGRESS.md) for stage-by-stage completion status.
@@ -20,10 +20,10 @@ See [`PROGRESS.md`](PROGRESS.md) for stage-by-stage completion status.
 | Phase | Role | Status |
 |-------|------|--------|
 | 1 | Raw file → clean DuckDB facts | ✅ Complete |
-| 2 | PDF/DOCX → ChromaDB qualitative chunks | ❌ Not started |
-| 3 | 6 deterministic Python tools (only path to data) | ❌ Not started |
-| 4 | LLM orchestration (routes questions, formats answers) | ❌ Not started |
-| 5 | Streamlit chat UI | ❌ Not started |
+| 2 | PDF/DOCX → ChromaDB qualitative chunks | ✅ Complete |
+| 3 | 6 deterministic Python tools (only path to data) | 🔄 In progress |
+| 4 | LLM orchestration (routes questions, formats answers) | 🔄 In progress |
+| 5 | Streamlit chat UI | 🔄 In progress |
 
 ## Phase 1 — What's Built
 
@@ -143,7 +143,7 @@ Located in `project/example_input_files/`. Results from last run:
 | ZenithOps Inc. | `ZenithOps_Financials_DataRoom.xlsx` | 168 | Summary + SaaS Metrics sheets |
 | M/s Sharma Textiles | `Sharma_Textiles_Financials_FY24_v3_FINAL_revised.xlsx` | 33 | 3 sheets |
 | M/s Krishnan Engineering | `Engineering_company_3yr_pnl_AS_PROVIDED_by_owner.xlsx` | 3 | Tally export only; ledger sheet needs LLM mapper |
-| — | `ZenithOps_CIM_Project_Atlas.docx` | — | Phase 2 (qualitative) — not yet handled |
+| — | `ZenithOps_CIM_Project_Atlas.docx` | — | Phase 2 qualitative indexing implemented (verified on this file) |
 
 ## Phase 3 — Tools to Build
 
@@ -164,8 +164,8 @@ All tools raise typed exceptions on missing data. Every result carries a citatio
 |-----------|-----------|
 | Data processing | Python, Polars |
 | Structured storage | DuckDB (local) |
-| Vector storage | ChromaDB (Phase 2, not started) |
-| PDF parsing | PyMuPDF (Phase 2, not started) |
+| Vector storage | ChromaDB (Phase 2 implemented) |
+| PDF parsing | PyMuPDF (Phase 2 implemented) |
 | Orchestration | LangChain / AutoGen (Phase 4, not started) |
 | LLM | Enterprise cloud API — Claude or GPT-4o |
 | UI | Streamlit (Phase 5, not started) |

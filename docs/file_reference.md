@@ -27,9 +27,12 @@ financial_analyst/
 │   │   ├── embeddings.py           # Phase 2 — sentence-transformer singleton (all-MiniLM-L6-v2)
 │   │   ├── qualitative.py         # Phase 2 — full qualitative pipeline (PDF/DOCX → ChromaDB)
 │   │   └── test_qualitative.py    # Phase 2 unit tests
+│   │   ├── phase3_tools.py        # Phase 3 — deterministic tool surface + typed exceptions
+│   │   └── phase4_orchestrator.py # Phase 4 — deterministic routing + LIVE state gate + audit log
 │   ├── input_files/               # Drop real files here to ingest
 │   ├── example_input_files/       # Reference example files (do not modify)
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── app.py                     # Phase 5 — Streamlit app scaffold
 ├── financial_agent.duckdb         # Stale root-level DB — ignore
 └── test.ipynb                     # Empty notebook
 ```
@@ -90,8 +93,7 @@ python pipeline.py --report-only # print live_facts summary only
 - `register_qualitative_file(conn, entity_id, filename, file_path, file_type, checksum)` — Phase 2; inserts source_files row for PDF/DOCX with state=REGISTERED
 - `get_qualitative_chunks(conn, entity_id, chunk_ids)` — Phase 2; fetches chunk metadata from DuckDB (not ChromaDB vectors)
 
-**State machine:** `UPLOADED → SCHEMA_MAPPED → AWAITING_CONFLICT_RESOLUTION → LIVE`
-(Note: full enforcement not yet implemented — files go straight to LIVE after pipeline run)
+**State machine:** `UPLOADED → SCHEMA_MAPPED → AWAITING_CONFLICT_RESOLUTION → AWAITING_ACKNOWLEDGMENT → LIVE`
 
 ---
 
@@ -111,12 +113,14 @@ python pipeline.py --report-only # print live_facts summary only
 **Key function:**
 - `resolve_alias(raw_header)` — returns canonical field name or `None`; strips parenthetical qualifiers (e.g. `"ARR ($000s)"` → `"arr"`) and leading whitespace (indented labels)
 
-**Limitation:** This is a static dictionary. Any header not in `ALIAS_MAP` is silently dropped. The LLM schema mapper (PRD Stage 5) is not yet built.
+**Behavior:** Static alias mapping is augmented by the Stage 5 LLM mapper when enabled; high/medium-confidence mappings are cached and re-applied on re-ingestion.
 
 ---
 
 ### `file_reader.py`
 **Role:** File reading, preamble detection, layout detection, multi-sheet support, fact extraction.
+
+**Recent enhancement:** row-level unit override detection for mixed-unit sheets (e.g., labels containing lakh/crore/usd hints).
 
 **Key functions:**
 

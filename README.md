@@ -26,7 +26,7 @@ Financial AI Co-Pilot is a **deterministic financial intelligence system** desig
 
 - 🔒 **Zero data leakage** — raw financial data never leaves your machine
 - 🧮 **Zero-hallucination math** — all arithmetic is deterministic Python, never LLM-generated
-- 📂 **Multi-format ingestion** — CSV, Excel (multi-sheet), with PDF/DOCX planned
+- 📂 **Multi-format ingestion** — CSV, Excel (multi-sheet), PDF, DOCX
 - 🔄 **Fully auto-detected** — entity names, units, layouts, and periods require zero configuration
 - ⚖️ **Conflict resolution** — cross-source disagreements are surfaced to the user, never silently resolved
 - 📊 **Unit-explicit storage** — every fact carries `(value, unit, original_unit, conversion_factor)`
@@ -55,11 +55,11 @@ The system is built across **5 phases**, each with a distinct responsibility:
 
 | Phase | Role | Status |
 |-------|------|--------|
-| **1** | Raw file → clean, unit-explicit DuckDB facts | 🔄 Partial |
-| **2** | PDF/DOCX → ChromaDB qualitative chunks | ❌ Not started |
-| **3** | 6 deterministic Python tools (only path to data) | ❌ Not started |
-| **4** | LLM orchestration (routes questions, formats answers) | ❌ Not started |
-| **5** | Streamlit chat UI | ❌ Not started |
+| **1** | Raw file → clean, unit-explicit DuckDB facts | ✅ Complete |
+| **2** | PDF/DOCX → ChromaDB qualitative chunks | ✅ Complete |
+| **3** | 6 deterministic Python tools (only path to data) | 🔄 In progress |
+| **4** | LLM orchestration (routes questions, formats answers) | 🔄 In progress |
+| **5** | Streamlit chat UI | 🔄 In progress |
 
 > See [`PROGRESS.md`](PROGRESS.md) for detailed stage-by-stage status.
 
@@ -185,7 +185,7 @@ Phase 1 is the quantitative ingestion engine. It reads structured financial file
   ┌─────────────┐     ┌─────────────┐     ┌──────────────┐     ┌──────────────┐
   │  Stage 8    │     │  Stage 7    │     │   Stage 6    │     │   Staging    │
   │  Promote    │◀────│  Onboarding │◀────│  Validation  │◀────│   Facts      │
-  │  to Live    │     │  (planned)  │     │  Gate        │     │   Written    │
+  │  to Live    │     │  Onboarding │     │  Gate        │     │   Written    │
   └─────────────┘     └─────────────┘     └──────────────┘     └──────────────┘
 ```
 
@@ -366,7 +366,7 @@ Example: f_glow_naturals_FY24-M06_revenue_net
 UPLOADED → SCHEMA_MAPPED → AWAITING_CONFLICT_RESOLUTION → AWAITING_ACKNOWLEDGMENT → LIVE
 ```
 
-> **Note:** Full enforcement is not yet implemented — files currently go straight to LIVE after pipeline run.
+> **Note:** Stage includes an onboarding acknowledgment gate before LIVE promotion in interactive runs.
 
 ### Reset Database
 
@@ -388,7 +388,7 @@ Located in `project/example_input_files/` — reference files used to validate t
 | M/s Sharma Textiles | `Sharma_Textiles_Financials_FY24_v3_FINAL_revised.xlsx` | 33 | 3 sheets, different units per sheet (Lakhs vs Crore), mixed units within a sheet |
 | M/s Krishnan Engineering | `Engineering_company_3yr_pnl_AS_PROVIDED_by_owner.xlsx` | 3 | Tally export, ledger format — needs LLM mapper |
 | ZenithOps Inc. | `ZenithOps_Financials_DataRoom.xlsx` | 168 | 5 sheets, USD thousands, FY2020A/E/P periods, SaaS metrics |
-| ZenithOps Inc. | `ZenithOps_CIM_Project_Atlas.docx` | — | Phase 2 (qualitative) — not yet handled |
+| ZenithOps Inc. | `ZenithOps_CIM_Project_Atlas.docx` | — | Phase 2 qualitative indexing implemented |
 
 ---
 
@@ -416,8 +416,8 @@ These are **non-negotiable** rules enforced across the entire system:
 | Excel reading | [openpyxl](https://openpyxl.readthedocs.io/) | ✅ Active |
 | Data validation | [Pydantic](https://docs.pydantic.dev/) | ✅ Active |
 | LLM (schema mapping) | Claude via Anthropic API | 🔄 Partial |
-| Vector storage | ChromaDB | ❌ Phase 2 |
-| PDF parsing | PyMuPDF | ❌ Phase 2 |
+| Vector storage | ChromaDB | ✅ Implemented |
+| PDF parsing | PyMuPDF | ✅ Implemented |
 | LLM orchestration | LangChain / AutoGen | ❌ Phase 4 |
 | UI | Streamlit | ❌ Phase 5 |
 
@@ -445,7 +445,7 @@ These are **non-negotiable** rules enforced across the entire system:
  4. Phase 1 Stage 7 — Onboarding Conversation  ← needed before Phase 5 end-to-end
  5. Phase 4 — LLM Orchestration                ← wires LLM to Phase 3 tools
  6. Phase 5 — Streamlit UI                     ← plug orchestrator into chat
- 7. Phase 2 — Qualitative Pipeline             ← independent, can run in parallel
+ 7. Phase 2 — Qualitative Pipeline             ← implemented
 ```
 
 ### Phase 3 — Tools to Build
@@ -467,7 +467,7 @@ All tools will raise typed exceptions (`MetricNotFound`, `AmbiguousEntity`, etc.
 - **Mixed units within a sheet** — e.g. rows in Lakhs mixed with rows in absolute Rs
 - **Cell-level citations** — `live_facts` rows don't carry sheet + cell reference yet
 - **File state machine** — exists in schema but not enforced; files go straight to LIVE
-- **Accounting paren negatives** — `(124.50)` → `-124.50` not yet converted
+- **Accounting paren negatives** — `(124.50)` → `-124.50` conversion implemented
 
 ---
 

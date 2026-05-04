@@ -96,14 +96,14 @@ Verification status:
 
 | Item | Status | Notes |
 |------|--------|-------|
-| PyMuPDF PDF parser | ❌ | |
-| python-docx DOCX parser | ❌ | |
-| Document bifurcation (tables → Phase 1, text → Phase 2) | ❌ | |
-| Chunking (150–300 words, no split paragraphs) | ❌ | |
-| Annotation linking (chunk → fact_id) | ❌ | |
-| ChromaDB embedding + storage | ❌ | |
-| `contains_numerical_claim` flag on chunks | ❌ | |
-| Notes column capture from tabular files | ❌ | e.g. Glow Naturals "notes" column with "monsoon dip" etc. |
+| PyMuPDF PDF parser | ✅ | Implemented in `qualitative.py` |
+| python-docx DOCX parser | ✅ | Implemented in `qualitative.py` |
+| Document bifurcation (tables → Phase 1, text → Phase 2) | 🔄 | Partial: qualitative files are routed to Phase 2; unified mixed-content bifurcation logic can be expanded |
+| Chunking (150–300 words, no split paragraphs) | ✅ | Implemented chunking pipeline with paragraph-aware processing |
+| Annotation linking (chunk → fact_id) | ✅ | Claim/linking pipeline implemented in `qualitative.py` |
+| ChromaDB embedding + storage | ✅ | Implemented with local ChromaDB persistence + upsert dedupe |
+| `contains_numerical_claim` flag on chunks | ✅ | Implemented and persisted in chunk metadata |
+| Notes column capture from tabular files | ✅ | `extract_inline_annotations()` in `file_reader.py` |
 
 ---
 
@@ -111,19 +111,20 @@ Verification status:
 
 **Goal:** 6 Python tools are the only authorised path from a question to a fact. No raw SQL from LLM.
 
-**Overall status: ❌ Not started**
+**Overall status: 🔄 In progress**
 
 | Tool | Status | Notes |
 |------|--------|-------|
-| `fetch_metric(entity_id, metric, period, unit_out)` | ❌ | |
-| `calculate_variance(entity_id, metric, period_1, period_2, unit_out)` | ❌ | |
-| `calculate_ratio(entity_id, numerator, denominator, period, unit_out)` | ❌ | |
-| `search_context(entity_id, query, period_filter, metric_filter)` | ❌ | Depends on Phase 2 |
-| `list_sources(entity_id, metric, period)` | ❌ | |
-| `list_available_metrics(entity_id)` | ❌ | |
-| Citation envelope on all tool results | ❌ | Defined in PRD §6 |
-| Typed exceptions (MetricNotFound, AmbiguousEntity, etc.) | ❌ | |
-| Decimal precision (not float) | ❌ | |
+| `fetch_metric(entity_id, metric, period, unit_out)` | ✅ | Implemented in `phase3_tools.py` |
+| `calculate_variance(entity_id, metric, period_1, period_2, unit_out)` | ✅ | Implemented in `phase3_tools.py` |
+| `calculate_ratio(entity_id, numerator, denominator, period, unit_out)` | ✅ | Implemented in `phase3_tools.py` |
+| `search_context(entity_id, query, period_filter, metric_filter)` | ✅ | Implemented against `qualitative_chunks` metadata |
+| `list_sources(entity_id, metric, period)` | ✅ | Implemented in `phase3_tools.py` |
+| `list_available_metrics(entity_id)` | ✅ | Implemented in `phase3_tools.py` |
+| Citation envelope on all tool results | ✅ | Included for metric/variance/ratio responses |
+| Typed exceptions (MetricNotFound, AmbiguousEntity, etc.) | ✅ | Added in `phase3_tools.py` |
+| Decimal precision (not float) | ✅ | `Decimal` used for deterministic calculations |
+| Phase 3/4 test coverage | ✅ | `test_phase3_phase4.py` added; total suite now 24 passing tests |
 
 ---
 
@@ -131,18 +132,18 @@ Verification status:
 
 **Goal:** LLM routes questions to tools and formats answers. Never performs arithmetic or writes SQL.
 
-**Overall status: ❌ Not started**
+**Overall status: 🔄 In progress**
 
 | Item | Status | Notes |
 |------|--------|-------|
-| LLM API integration (Claude / GPT-4o) | ❌ | |
-| System prompt (router-only persona, no math, no guessing) | ❌ | |
-| Entity resolution pre-flight (name → entity_id before any tool call) | ❌ | |
-| File state gate (refuse queries on non-LIVE entities) | ❌ | |
-| `list_available_metrics` called every turn | ❌ | |
-| Conflict-aware response template | ❌ | |
-| `contains_numerical_claim` cross-check (DuckDB wins over narrative) | ❌ | Depends on Phase 2 + 3 |
-| Tool-call audit log | ❌ | |
+| LLM API integration (Claude / GPT-4o) | ❌ | Not wired yet |
+| System prompt (router-only persona, no math, no guessing) | ❌ | Not wired yet |
+| Entity resolution pre-flight (name → entity_id before any tool call) | ✅ | Implemented in orchestrator/tool layer |
+| File state gate (refuse queries on non-LIVE entities) | ✅ | Implemented in `phase4_orchestrator.py` |
+| `list_available_metrics` called every turn | ✅ | Implemented in `answer_question()` |
+| Conflict-aware response template | 🔄 | Basic deterministic templates present |
+| `contains_numerical_claim` cross-check (DuckDB wins over narrative) | ❌ | Next enhancement |
+| Tool-call audit log | ✅ | JSONL audit log implemented |
 
 ---
 
@@ -150,42 +151,36 @@ Verification status:
 
 **Goal:** Streamlit chat app. File upload triggers Phase 1+2. Onboarding conversation. Show-your-work expanders.
 
-**Overall status: ❌ Not started**
+**Overall status: 🔄 In progress**
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Streamlit app scaffold | ❌ | |
-| File drag-and-drop upload | ❌ | |
-| Background Phase 1+2 processing on upload | ❌ | |
-| Onboarding conversation message render | ❌ | Depends on Phase 1 Stage 7 |
-| File state indicators (LIVE / AWAITING) | ❌ | |
-| Chat input gated by file state | ❌ | |
-| Inline citations on every numerical answer | ❌ | Depends on Phase 3 |
-| "Show your work" expander per answer | ❌ | |
-| Reset source choices command | ❌ | |
-| Multi-file session support | ❌ | |
+| Streamlit app scaffold | ✅ | Added `project/app.py` |
+| File drag-and-drop upload | ✅ | Implemented basic uploader in `project/app.py` |
+| Background Phase 1+2 processing on upload | ❌ | Not yet async/backgrounded |
+| Onboarding conversation message render | ❌ | Pending UX work |
+| File state indicators (LIVE / AWAITING) | ❌ | Pending UI enhancement |
+| Chat input gated by file state | ✅ | Enforced via orchestrator LIVE gate |
+| Inline citations on every numerical answer | 🔄 | Tool payload includes citations; UI rendering pending |
+| "Show your work" expander per answer | ❌ | Pending UI enhancement |
+| Reset source choices command | ❌ | Pending |
+| Multi-file session support | 🔄 | Basic entity selection implemented |
 
 ---
 
 ## What to build next (recommended order)
 
-1. **Phase 1 Stage 5 — LLM schema mapper**
-   The alias dict is the hard ceiling. Any file with novel headers (new industry, new accounting style) extracts 0 facts for those rows. Building the LLM mapper with deterministic validation will make ingestion truly general-purpose.
-
-2. **Phase 1 Stage 6 — Validation gate**
-   Sum checks, unit magnitude checks, cross-period sanity checks. Prevents silently wrong numbers.
-
-3. **Phase 3 — Tool surface**
+1. **Phase 3 — Tool surface**
    Can be built and tested against the current live_facts without Phase 2 or 5. These tools are what the LLM orchestrator calls — building them first means Phases 4 and 5 have something real to plug into.
 
-4. **Phase 1 Stage 7 — Onboarding conversation**
-   Generates the bot's first chat message. Needed before Phase 5 can be tested end-to-end.
-
-5. **Phase 4 — LLM orchestration**
+2. **Phase 4 — LLM orchestration**
    Wire the LLM to Phase 3 tools with the system prompt constraints.
 
-6. **Phase 5 — Streamlit UI**
+3. **Phase 5 — Streamlit UI**
    Plug orchestrator into a chat surface.
 
-7. **Phase 2 — Qualitative pipeline**
-   Can run in parallel with Phase 3/4/5 since it's independent.
+4. **Phase 4 completion — LLM routing layer**
+   Wire real LLM prompt + strict tool schema and claim cross-check policy.
+
+5. **Phase 5 completion — Streamlit UX**
+   Add onboarding cards, state badges, citation expanders, and background processing.
