@@ -587,6 +587,11 @@ def resolve_alias(raw_header: str) -> Optional[str]:
     """Return canonical field name for a raw header, or None if unknown."""
     import re as _re
     key = raw_header.strip().lower()
+
+    # 1. Check session-level LLM cache first (registered during pipeline run)
+    if hasattr(resolve_alias, '_llm_cache') and key in resolve_alias._llm_cache:
+        return resolve_alias._llm_cache[key]
+
     if key in ALIAS_MAP:
         return ALIAS_MAP[key]
     # Try stripping parenthetical qualifiers: "ARR ($000s)" → "arr"
@@ -598,6 +603,21 @@ def resolve_alias(raw_header: str) -> Optional[str]:
     if fuzzy_match:
         return fuzzy_match
     return None
+
+
+# ── Session-level LLM alias cache ─────────────────────────────────────────────
+
+def register_llm_mapping(raw_header: str, canonical_field: str) -> None:
+    """Register an LLM-discovered mapping so resolve_alias picks it up on re-ingestion."""
+    if not hasattr(resolve_alias, '_llm_cache'):
+        resolve_alias._llm_cache = {}
+    resolve_alias._llm_cache[raw_header.strip().lower()] = canonical_field
+
+
+def clear_llm_cache() -> None:
+    """Clear the LLM alias cache (useful for testing or reset)."""
+    if hasattr(resolve_alias, '_llm_cache'):
+        resolve_alias._llm_cache.clear()
 
 
 # ── Fuzzy matching via keyword extraction ───────────────────────────────────

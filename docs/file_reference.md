@@ -19,7 +19,10 @@ financial_analyst/
 │   │   ├── units.py               # Unit normalisation
 │   │   ├── periods.py             # Period string normalisation
 │   │   ├── conflict_resolver.py   # Conflict detection + promotion
-│   │   └── generate.py            # Mock data generator
+│   │   ├── generate.py            # Mock data generator
+│   │   ├── llm_mapper.py          # Stage 5 — LLM schema mapper
+│   │   ├── validation_gate.py     # Stage 6 — Validation gate
+│   │   └── onboarding_gate.py     # Stage 7 — Onboarding gate
 │   ├── input_files/               # Drop real files here to ingest
 │   ├── example_input_files/       # Reference example files (do not modify)
 │   └── requirements.txt
@@ -194,6 +197,63 @@ python pipeline.py --report-only # print live_facts summary only
 Generates:
 - **Glow Naturals** — D2C, wide format, INR Lakhs, 12 months FY24, seasonality
 - **Krishnan Engineering** — 2 files with intentional FY24 conflict (27.3 vs 28.1 Cr revenue)
+
+---
+
+### `llm_mapper.py`
+**Role:** Stage 5 — LLM schema mapper. Calls Anthropic Claude API to map unmapped raw headers to canonical fields.
+
+**Key types:**
+- `SchemaMapping` — raw_header, canonical_field, confidence, reasoning, mapped_by, needs_review
+
+**Key functions:**
+- `llm_map_with_cache(unmapped_headers, file_context)` → `list[SchemaMapping]` — checks cache first, calls LLM only for uncached headers
+- `get_cached_mapping(raw_header)` → `Optional[str]` — cache lookup
+- `register_llm_mapping(raw_header, canonical_field)` — session-level cache registration (in `canonical_fields.py`)
+- `enrich_with_llm(unmapped_headers, file_context)` → `dict[str, str]` — high-level wrapper
+
+**Behavior:** After LLM mapping returns high/medium confidence results, pipeline:
+1. Registers each mapping in `canonical_fields.register_llm_mapping()` (session cache)
+2. Inserts into `schema_mappings` table with `mapped_by='llm'`
+3. Re-ingests the file to pick up facts for newly mapped headers
+
+**Requires:** `ANTHROPIC_API_KEY` environment variable. Falls back gracefully if not set.
+
+---
+
+### `validation_gate.py`
+**Role:** Stage 6 — Validation gate. Runs deterministic checks on staging facts before promotion.
+
+**Checks:**
+- **Sum checks**: revenue_gross - returns_refunds ≈ revenue_net; margin consistency
+- **Unit magnitude**: INR values in sensible ranges (catches absolute vs lakh confusion)
+- **Period swings**: flags >10x changes between adjacent periods
+- **Sign consistency**: revenue should be positive, expenses typically positive
+
+**Key types:**
+- `ValidationIssue` — check, severity (error/warning), entity_id, canonical_field, period, value, message, suggestion
+- `ValidationReport` — entity_id, issues list, passed_checks; `has_errors`, `has_warnings` properties
+
+**Key functions:**
+- `validate_staging_facts(conn, entity_id, file_ids)` → `ValidationReport`
+- `print_validation_report(report)` → formatted string
+
+**Behavior:** Soft block — errors pause pipeline and prompt user for choice. Non-interactive runs default to proceed.
+
+---
+
+### `onboarding_gate.py`
+**Role:** Stage 7 — Onboarding conversation gate. Presents summary of ingested data and awaits user acknowledgment before LIVE promotion.
+
+**Key functions:**
+- `build_onboarding_summary(conn, entity_id, entity_name, file_ids)` → str — human-readable summary with files, facts count, conflicts, sample facts
+- `run_onboarding_gate(conn, entity_id, entity_name, file_ids)` → bool — interactive gate; returns True if acknowledged
+
+**Behavior:**
+- Prints summary of files, staged facts, conflicts, sample facts
+- Prompts `[Y/n]` — user must acknowledge
+- Non-interactive (EOFError) auto-proceeds
+- User can decline, skipping LIVE promotion for that entity
 
 ---
 

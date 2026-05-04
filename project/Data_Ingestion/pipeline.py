@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from schema import (
     get_connection, initialise_schema,
-    get_or_create_entity, register_file, update_file_state
+    get_or_create_entity, register_file, update_file_state,
+    insert_schema_mapping, get_files_needing_acknowledgment
 )
 from file_reader import ingest_file, detect_entity_name, _read_file, list_excel_sheets
 from conflict_resolver import (
@@ -67,7 +68,7 @@ def _group_files_by_entity(files: list[Path]) -> dict[str, list[Path]]:
     groups: dict[str, list[Path]] = defaultdict(list)
     for path in files:
         try:
-            df, _, preamble = _read_file(path)
+            df, _, preamble, _ = _read_file(path)
             name = detect_entity_name(path, df, preamble)
         except Exception as e:
             print(f"  WARNING: could not read {path.name} — {e}")
@@ -108,11 +109,13 @@ def _resolve_conflicts_interactive(conn, entity_name: str, entity_id: int) -> No
             print(f"  Please enter a number between 1 and {len(c.options)}.")
 
 
-def run_pipeline(db_path: Path = Path("financial_agent.duckdb"), mock: bool = False) -> None:
+def run_pipeline(mock: bool = False) -> None:
     print("\n" + "=" * 60)
     print("  FINANCIAL AI AGENT — Phase 1 Pipeline")
     print("=" * 60)
 
+    # Use same path as get_connection() default (schema.py DB_PATH)
+    db_path = Path(__file__).parent / "financial_agent.duckdb"
     conn = get_connection(db_path)
     initialise_schema(conn)
 
@@ -184,6 +187,7 @@ def _run_from_input_files(conn: duckdb.DuckDBPyConnection) -> None:
                     print(f"  Unmapped:      {shown}")
 
                     # Stage 5 — LLM Schema Mapper: attempt to map unmapped headers
+                    high_confidence_mappings = []
                     try:
                         file_ctx = {
                             "entity_name": entity_name,
@@ -199,6 +203,14 @@ def _run_from_input_files(conn: duckdb.DuckDBPyConnection) -> None:
                             for m in llm_mappings:
                                 if m.canonical_field and m.confidence in ("high", "medium"):
                                     print(f"    → \"{m.raw_header}\" → {m.canonical_field} ({m.confidence})")
+                                    # Register in session cache
+                                    register_llm_mapping(m.raw_header, m.canonical_field)
+                                    # Store in schema_mappings table
+                                    insert_schema_mapping(
+                                        conn, file_id, m.raw_header, m.canonical_field,
+                                        confidence=m.confidence, mapped_by="llm"
+                                    )
+                                    high_confidence_mappings.append(m)
                     except RuntimeError as e:
                         if "ANTHROPIC_API_KEY not set" in str(e):
                             print(f"  LLM mapper skipped: {e}")
@@ -206,6 +218,19 @@ def _run_from_input_files(conn: duckdb.DuckDBPyConnection) -> None:
                             print(f"  LLM mapper error: {e}")
                     except Exception as e:
                         print(f"  LLM mapper error: {e}")
+
+                    # Re-ingest file if LLM mappings found — pick up facts for newly mapped headers
+                    if high_confidence_mappings:
+                        print(f"  Re-ingesting to capture {len(high_confidence_mappings)} LLM-mapped facts...")
+                        # Delete staging rows for this file/sheet
+                        conn.execute("DELETE FROM staging_facts WHERE file_id = ?", [file_id])
+                        conn.commit()
+                        # Re-extract with LLM mappings in cache
+                        result = ingest_file(
+                            conn, path, file_id, entity_id,
+                            sheet_name=sheet if sheet else None
+                        )
+                        print(f"  Re-ingest: {result['facts_staged']} facts staged (total)")
 
                 file_ids.append(file_id)
 
@@ -215,28 +240,67 @@ def _run_from_input_files(conn: duckdb.DuckDBPyConnection) -> None:
     for entity_id, _, entity_name in entity_records:
         _resolve_conflicts_interactive(conn, entity_name, entity_id)
 
-    # Stage 6 — Validation Gate: check staging facts before promotion
+    # After conflict resolution, move files to AWAITING_ACKNOWLEDGMENT state
+    for entity_id, file_ids, entity_name in entity_records:
+        for fid in file_ids:
+            update_file_state(conn, fid, "AWAITING_ACKNOWLEDGMENT")
+
+    # Stage 6 — Validation Gate: check staging facts before promotion (soft block)
     print("\n── Stage 6: Validation Gate " + "─" * 34)
-    validation_issues_total = 0
+    validation_reports = []
     for entity_id, file_ids, entity_name in entity_records:
         report = validate_staging_facts(conn, entity_id, file_ids)
+        validation_reports.append((entity_id, file_ids, entity_name, report))
         if report.has_warnings or report.has_errors:
             print(f"  {entity_name}:")
             print(print_validation_report(report))
-            validation_issues_total += len(report.issues)
         else:
             print(f"  {entity_name}: all checks passed")
-    if validation_issues_total > 0:
-        print(f"\n  ⚠ {validation_issues_total} validation issue(s) found — review before trusting data")
 
-    print("\n── Promoting to live_facts " + "─" * 34)
+    # Soft block: if errors exist, prompt user
+    total_errors = sum(r.has_errors for _, _, _, r in validation_reports)
+    if total_errors > 0:
+        print(f"\n  ⚠ {total_errors} blocking error(s) found.")
+        print("  Options:")
+        print("    [1] Proceed anyway (promote non-error facts)")
+        print("    [2] Abort pipeline")
+        try:
+            choice = input("  Choose [1/2] (default=1): ").strip()
+            if choice == "2":
+                print("  Pipeline aborted by user.")
+                conn.close()
+                return
+        except EOFError:
+            print("  Non-interactive run — proceeding by default.")
+        except KeyboardInterrupt:
+            print("\n  Pipeline aborted.")
+            conn.close()
+            return
+
+    # Stage 7 — Onboarding Conversation Gate
+    print("\n── Stage 7: Onboarding Gate " + "─" * 36)
     for entity_id, file_ids, entity_name in entity_records:
+        print(f"  Reviewing {entity_name}...")
+        try:
+            from onboarding_gate import run_onboarding_gate
+            acknowledged = run_onboarding_gate(conn, entity_id, entity_name, file_ids)
+            if not acknowledged:
+                print(f"  {entity_name}: skipped by user — not promoting to LIVE")
+                continue
+        except ImportError:
+            print(f"  onboarding_gate.py not found — skipping acknowledgment gate")
+            acknowledged = True
+        except Exception as e:
+            print(f"  Onboarding gate error: {e} — proceeding")
+            acknowledged = True
+
+        # Promote to LIVE
         for fid in file_ids:
             update_file_state(conn, fid, "LIVE")
         slug = _slugify(entity_name)
         n = promote_to_live(conn, entity_id, slug)
         d = compute_derived_kpis(conn, entity_id, slug)
-        print(f"  {entity_name}: {n} live facts, {d} derived KPIs")
+        print(f"  {entity_name}: {n} live facts, {d} derived KPIs → LIVE")
 
 
 def _run_mock(conn: duckdb.DuckDBPyConnection) -> None:
@@ -282,13 +346,26 @@ def _run_mock(conn: duckdb.DuckDBPyConnection) -> None:
             print(f"  Auto-resolved {c.canonical_field} | {c.period} → {chosen['source_filename']}")
 
     print("\n── Promoting to live_facts (mock) " + "─" * 27)
+    # Move files to AWAITING_ACKNOWLEDGMENT after conflict resolution
     for entity_id, file_ids, entity_name in records:
+        for fid in file_ids:
+            update_file_state(conn, fid, "AWAITING_ACKNOWLEDGMENT")
+
+    # Run onboarding gate (non-interactive — auto-proceeds)
+    for entity_id, file_ids, entity_name in records:
+        print(f"  {entity_name}: AWAITING_ACKNOWLEDGMENT")
+        from onboarding_gate import build_onboarding_summary
+        summary = build_onboarding_summary(conn, entity_id, entity_name, file_ids)
+        print(summary)
+        print("  Non-interactive run — auto-proceeding to LIVE.")
+
+        # Promote to LIVE
         for fid in file_ids:
             update_file_state(conn, fid, "LIVE")
         slug = _slugify(entity_name)
         n = promote_to_live(conn, entity_id, slug)
         d = compute_derived_kpis(conn, entity_id, slug)
-        print(f"  {entity_name}: {n} live facts, {d} derived KPIs")
+        print(f"  {entity_name}: {n} live facts, {d} derived KPIs → LIVE")
 
 
 def print_summary(conn: duckdb.DuckDBPyConnection) -> None:

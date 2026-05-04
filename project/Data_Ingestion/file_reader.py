@@ -198,10 +198,10 @@ def detect_layout(df: pl.DataFrame) -> str:
 
 # ── File readers ──────────────────────────────────────────────────────────────
 
-def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.DataFrame, str, list[str]]:
+def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.DataFrame, str, list[str], int]:
     """
     Read Excel or CSV, skipping any preamble rows above the data table.
-    Returns (DataFrame, detected_unit_string, preamble_lines).
+    Returns (DataFrame, detected_unit_string, preamble_lines, skip_rows).
     """
     suffix = file_path.suffix.lower()
     skip_rows, preamble = _find_data_start(file_path, sheet_name)
@@ -252,7 +252,7 @@ def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.Da
         raise ValueError(f"Unsupported file type: {suffix}")
 
     detected_unit = _sniff_unit(df, preamble)
-    return df, detected_unit, preamble
+    return df, detected_unit, preamble, skip_rows
 
 
 def _sniff_unit(df: pl.DataFrame, preamble: Optional[list[str]] = None) -> str:
@@ -314,14 +314,14 @@ def _parse_numeric_value(raw_val) -> Optional[float]:
 
 
 def _get_cell_reference(col_idx: int, row_idx: int) -> str:
-    """Convert 0-based indices to Excel-style cell reference (e.g., B5)."""
+    """Convert 1-based indices to Excel-style cell reference (e.g., B5)."""
     # Excel column names: A, B, ..., Z, AA, AB, ...
     col_letter = ''
-    col_num = col_idx + 1  # 1-based
+    col_num = col_idx  # already 1-based
     while col_num > 0:
         col_num, remainder = divmod(col_num - 1, 26)
         col_letter = chr(65 + remainder) + col_letter
-    return f"{col_letter}{row_idx + 1}"  # row_idx is 0-based
+    return f"{col_letter}{row_idx}"  # row_idx already 1-based
 
 
 # ── Wide layout extractor ─────────────────────────────────────────────────────
@@ -331,6 +331,8 @@ def extract_wide(
     file_id: int,
     entity_id: int,
     unit_spec_str: str,
+    skip_rows: int = 0,
+    source_sheet: Optional[str] = None,
 ) -> list[dict]:
     """
     Extract facts from a wide-format dataframe.
@@ -376,8 +378,9 @@ def extract_wide(
                 continue
 
             nv = normalise(numeric_val, unit_spec_str)
-            # Calculate cell reference (metric col is 0, period cols start at 1)
-            cell_ref = _get_cell_reference(col_idx + 1, row_idx + 1 + skip_rows_in_df(row_idx, df, metric_col))
+            # Cell ref: period col (1-based frame index) + skip_rows offset
+            # col_idx starts at 0 for period_cols[0] at df.columns[1] = B
+            cell_ref = _get_cell_reference(col_idx + 2, row_idx + 1 + skip_rows)
 
             facts.append({
                 "file_id": file_id,
@@ -393,17 +396,10 @@ def extract_wide(
                 "raw_header": raw_label,
                 "row_context": raw_label,
                 "cell_reference": cell_ref,
-                "source_sheet": None,
+                "source_sheet": source_sheet,
             })
 
     return facts
-
-
-def skip_rows_in_df(row_idx: int, df: pl.DataFrame, metric_col: str) -> int:
-    """Estimate header rows that were skipped (for cell reference accuracy)."""
-    # This is an approximation; actual skip depends on preamble detection
-    # For cell references, we add a buffer for header rows
-    return 0  # Simplified - actual implementation would track this precisely
 
 
 # ── Tall layout extractor ─────────────────────────────────────────────────────
@@ -413,6 +409,8 @@ def extract_tall(
     file_id: int,
     entity_id: int,
     unit_spec_str: str,
+    skip_rows: int = 0,
+    source_sheet: Optional[str] = None,
 ) -> list[dict]:
     """
     Extract facts from a tall-format dataframe.
@@ -423,7 +421,7 @@ def extract_tall(
     metric_cols = df.columns[1:]
     unit_spec = detect_unit(unit_spec_str)
 
-    for row in df.iter_rows(named=True):
+    for row_idx, row in enumerate(df.iter_rows(named=True)):
         raw_period = str(row.get(period_col, "") or "").strip()
         # Skip section separator rows
         if str(raw_period).startswith('---'):
@@ -432,21 +430,20 @@ def extract_tall(
         if not period_spec:
             continue
 
-        for metric_col in metric_cols:
+        for col_idx, metric_col in enumerate(metric_cols, start=1):
             canonical = resolve_alias(metric_col)
             if not canonical:
                 continue
 
             raw_val = row.get(metric_col)
-            if raw_val is None or str(raw_val).strip() in ("", "-", "—", "N/A", "na"):
-                continue
-
-            try:
-                numeric_val = float(str(raw_val).replace(",", "").strip())
-            except ValueError:
+            numeric_val = _parse_numeric_value(raw_val)
+            if numeric_val is None:
                 continue
 
             nv = normalise(numeric_val, unit_spec_str)
+            # Cell ref: metric columns start at df.columns[1] = B
+            # col_idx from enumerate starts at 1 for df.columns[1], so +1 gives correct column
+            cell_ref = _get_cell_reference(col_idx + 1, row_idx + 1 + skip_rows)
             facts.append({
                 "file_id": file_id,
                 "entity_id": entity_id,
@@ -460,6 +457,8 @@ def extract_tall(
                 "raw_value": numeric_val,
                 "raw_header": metric_col,
                 "row_context": raw_period,
+                "cell_reference": cell_ref,
+                "source_sheet": source_sheet,
             })
 
     return facts
@@ -484,16 +483,19 @@ def write_to_staging(conn: duckdb.DuckDBPyConnection, facts: list[dict]) -> int:
             INSERT INTO staging_facts (
                 staging_id, file_id, entity_id, canonical_field, period,
                 value_normalised, currency, original_unit, conversion_factor,
-                conversion_applied, raw_value, raw_header, row_context
+                conversion_applied, raw_value, raw_header, row_context,
+                cell_reference, source_sheet
             ) VALUES (
                 nextval('staging_id_seq'), ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?,
+                ?, ?
             )
         """, [
             f["file_id"], f["entity_id"], f["canonical_field"], f["period"],
             f["value_normalised"], f["currency"], f["original_unit"], f["conversion_factor"],
             f["conversion_applied"], f["raw_value"], f["raw_header"], f["row_context"],
+            f.get("cell_reference"), f.get("source_sheet"),
         ])
 
     conn.commit()
@@ -514,15 +516,15 @@ def ingest_file(
     Full ingestion pipeline for one file.
     confirmed_unit overrides auto-detected unit; omit to rely on auto-detection.
     """
-    df, detected_unit, preamble = _read_file(file_path, sheet_name)
+    df, detected_unit, preamble, skip_rows = _read_file(file_path, sheet_name)
     unit_str = confirmed_unit if confirmed_unit else detected_unit
     layout = detect_layout(df)
     entity_name = detect_entity_name(file_path, df, preamble)
 
     if layout == "wide":
-        facts = extract_wide(df, file_id, entity_id, unit_str)
+        facts = extract_wide(df, file_id, entity_id, unit_str, skip_rows=skip_rows, source_sheet=sheet_name)
     else:
-        facts = extract_tall(df, file_id, entity_id, unit_str)
+        facts = extract_tall(df, file_id, entity_id, unit_str, skip_rows=skip_rows, source_sheet=sheet_name)
 
     n = write_to_staging(conn, facts)
     unmapped = _find_unmapped(df, layout)

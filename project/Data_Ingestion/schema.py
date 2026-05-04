@@ -245,3 +245,27 @@ def update_file_state(
             [file_id]
         )
     conn.commit()
+
+
+def insert_schema_mapping(
+    conn: duckdb.DuckDBPyConnection,
+    file_id: int,
+    raw_header: str,
+    canonical_field: Optional[str],
+    confidence: str = "medium",
+    mapped_by: str = "llm",
+) -> None:
+    """Insert a schema mapping into the schema_mappings table."""
+    conn.execute("""
+        INSERT INTO schema_mappings (file_id, raw_header, canonical_field, confidence, mapped_by)
+        VALUES (?, ?, ?, ?, ?)
+    """, [file_id, raw_header, canonical_field, confidence, mapped_by])
+    conn.commit()
+
+
+def get_files_needing_acknowledgment(conn: duckdb.DuckDBPyConnection) -> list[int]:
+    """Return list of file_ids in AWAITING_ACKNOWLEDGMENT state."""
+    rows = conn.execute(
+        "SELECT file_id FROM source_files WHERE state = 'AWAITING_ACKNOWLEDGMENT'"
+    ).fetchall()
+    return [r[0] for r in rows]

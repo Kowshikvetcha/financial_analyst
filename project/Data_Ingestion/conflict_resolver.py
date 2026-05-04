@@ -173,7 +173,9 @@ def promote_to_live(
             s.conversion_factor,
             s.conversion_applied,
             s.file_id,
-            s.raw_header
+            s.raw_header,
+            s.cell_reference,
+            s.source_sheet
         FROM staging_facts s
         WHERE s.entity_id = ? {file_filter}
     """, params_base).fetchall()
@@ -215,7 +217,8 @@ def promote_to_live(
             chosen = next((r for r in rows if r[0] == winning_id), rows[0])
 
         (staging_id, canonical_field, period_str, value_normalised, currency,
-         original_unit, conversion_factor, conversion_applied, source_file_id, raw_header) = chosen
+         original_unit, conversion_factor, conversion_applied, source_file_id,
+         raw_header, cell_ref, source_sheet) = chosen
 
         fact_id = f"f_{entity_slug}_{period_str}_{canonical_field}"
         note = None
@@ -227,12 +230,14 @@ def promote_to_live(
                 fact_id, entity_id, entity_slug, canonical_field, period,
                 value_normalised, currency, original_unit, conversion_factor,
                 conversion_applied, source_file_id, staging_id,
+                cell_reference, source_sheet,
                 is_derived, authoritative_note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?)
         """, [
             fact_id, entity_id, entity_slug, canonical_field, period_str,
             value_normalised, currency, original_unit, conversion_factor,
-            conversion_applied, source_file_id, staging_id, note,
+            conversion_applied, source_file_id, staging_id,
+            cell_ref, source_sheet, note,
         ])
         promoted += 1
 

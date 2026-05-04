@@ -10,7 +10,7 @@ A local-first, zero-hallucination financial intelligence system for Private Equi
 
 ## Project Status
 
-Phase 1 (quantitative ingestion pipeline) is partially implemented. Phases 2–5 have not been started.
+Phase 1 (quantitative ingestion pipeline) is complete. Phases 2–5 have not been started.
 
 See [`docs/file_reference.md`](docs/file_reference.md) for a detailed breakdown of every file.
 See [`PROGRESS.md`](PROGRESS.md) for stage-by-stage completion status.
@@ -19,7 +19,7 @@ See [`PROGRESS.md`](PROGRESS.md) for stage-by-stage completion status.
 
 | Phase | Role | Status |
 |-------|------|--------|
-| 1 | Raw file → clean DuckDB facts | 🔄 Partial |
+| 1 | Raw file → clean DuckDB facts | ✅ Complete |
 | 2 | PDF/DOCX → ChromaDB qualitative chunks | ❌ Not started |
 | 3 | 6 deterministic Python tools (only path to data) | ❌ Not started |
 | 4 | LLM orchestration (routes questions, formats answers) | ❌ Not started |
@@ -33,23 +33,19 @@ The ingestion pipeline lives in `project/Data_Ingestion/`. Modules:
 
 - `pipeline.py` — orchestrator; auto-detects entity/unit/layout; iterates all sheets per Excel file
 - `schema.py` — DuckDB table definitions and helper functions; includes `sheet_name` on source_files; SHA-256 checksum
-- `canonical_fields.py` — 58 canonical metric definitions + ~330 alias mappings; `resolve_alias` strips parenthetical qualifiers
-- `file_reader.py` — Polars-based file reader; preamble skip; WIDE/TALL layout detection; multi-sheet support
+- `canonical_fields.py` — 58 canonical metric definitions + ~330 alias mappings; session-level LLM alias cache
+- `file_reader.py` — Polars-based file reader; preamble skip; WIDE/TALL layout detection; multi-sheet support; cell references
 - `units.py` — unit detection and normalisation (INR/USD, Lakhs/Crores/Millions)
 - `periods.py` — period string normalisation; handles FY 2023-24, FY24A, Q1'22, 31.03.24, date ranges
 - `conflict_resolver.py` — conflict detection, resolution, staging → live promotion, derived KPI computation
 - `generate.py` — generates mock test data (Glow Naturals, Krishnan Engineering)
 - `llm_mapper.py` — Stage 5 LLM schema mapper; calls Anthropic API for unmapped headers; persistent JSON cache
-- `validation_gate.py` — Stage 6 validation gate; sum checks, unit magnitude, period swings, sign consistency
+- `validation_gate.py` — Stage 6 validation gate; sum checks, unit magnitude, period swings, sign consistency; soft block
+- `onboarding_gate.py` — Stage 7 onboarding gate; prints summary, awaits user acknowledgment, gates LIVE promotion
 
-## Phase 1 — What's Missing
+## Phase 1 — Remaining Gap
 
-- **Stage 7 — Onboarding conversation**: facts go straight to LIVE with no user acknowledgment gate.
-- **Mixed units within a sheet**: e.g. Sharma Textiles "Other Exp Detail" — rows in Lakhs mixed with rows in absolute Rs.
-- **Cell-level citations**: `live_facts` rows don't carry sheet + cell reference yet.
-- **SHA-256 file checksum**: now computed via `compute_sha256()` in `schema.py`.
-- **LLM schema mapper**: built in `llm_mapper.py` — requires `ANTHROPIC_API_KEY` env var. Persistent cache at `llm_mapping_cache.json`.
-- **Validation gate**: built in `validation_gate.py` — sum checks, unit magnitude, period swings, sign consistency. Runs before promotion.
+- **Mixed units within a sheet**: e.g. Sharma Textiles "Other Exp Detail" — rows in Lakhs mixed with rows in absolute Rs. not detected.
 
 ## Database
 

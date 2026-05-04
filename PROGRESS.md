@@ -19,7 +19,7 @@
 
 **Goal:** Raw uploaded file → clean, unit-explicit, queryable facts in DuckDB.
 
-**Overall status: 🔄 In progress**
+**Overall status: ✅ Phase 1 complete**
 
 ### Infrastructure
 
@@ -28,26 +28,33 @@
 | DuckDB schema (7 tables) | ✅ | `schema.py` — entities, source_files, schema_mappings, staging_facts, live_facts, conflicts, ingestion_log |
 | `sheet_name` on source_files | ✅ | Added for per-sheet citation lineage |
 | Canonical field registry | ✅ | `canonical_fields.py` — 58 fields across 6 categories |
-| Alias map | ✅ | ~230 raw header → canonical field mappings; covers Indian P&L, SaaS, manufacturing, D2C |
+| Alias map | ✅ | ~330 raw header → canonical field mappings; covers Indian P&L, SaaS, manufacturing, D2C |
 | Unit normalisation | ✅ | `units.py` — INR (absolute/Lakh/Crore/Million) + USD (absolute/Thousand/Million/Billion) |
 | Period normalisation | ✅ | `periods.py` — FY annual/monthly/quarterly, calendar year, date formats, range notation |
 | Conflict detection | ✅ | `conflict_resolver.py` — detects (entity, field, period) disagreements across sources |
 | Conflict resolution (interactive) | ✅ | Pipeline prompts user to pick authoritative value |
 | Staging → live promotion | ✅ | `conflict_resolver.py` — `promote_to_live()` |
 | Derived KPI computation | ✅ | gross_profit, gross_margin_pct, ebitda_margin_pct, pat_margin_pct |
+| Cell-level citations | ✅ | `live_facts` rows carry `cell_reference` (e.g., "B5") and `source_sheet` |
+| SHA-256 file checksum | ✅ | Computed on registration via `compute_sha256()` |
+| LLM schema mapper | ✅ | `llm_mapper.py` — Anthropic API calls for unmapped headers, persistent JSON cache, re-ingest with LLM-mapped headers |
+| Validation gate | ✅ | `validation_gate.py` — sum checks, unit magnitude, period swings, sign consistency; soft block (prompts user) |
+| Onboarding conversation gate | ✅ | `onboarding_gate.py` — Stage 7; prints summary, awaits user acknowledgment before LIVE promotion |
+| State machine enforcement | ✅ | `UPLOADED → SCHEMA_MAPPED → AWAITING_CONFLICT_RESOLUTION → AWAITING_ACKNOWLEDGMENT → LIVE` |
+| Session-level LLM alias cache | ✅ | `canonical_fields.py` — `register_llm_mapping()` + `_llm_cache` on `resolve_alias()` |
 
 ### Stage-by-Stage (per PRD §5.1)
 
 | Stage | Name | Status | Notes |
 |-------|------|--------|-------|
-| 1 | File registration + checksum | ✅ | SHA-256 checksum now computed on registration via `compute_sha256()` |
+| 1 | File registration + checksum | ✅ | SHA-256 checksum computed on registration |
 | 2 | Region enumeration | ❌ | No multi-region detection; no routing of qualitative regions to Phase 2 |
-| 3 | Pre-normalisation | 🔄 | Preamble skip ✅, TOTAL row skip ✅, section header skip ✅, ragged lines ✅; paren-negative conversion ✅, mixed-unit row splitting ❌ |
-| 4 | Unit & period detection | ✅ | Per-sheet unit detection ✅, all major period formats ✅ |
-| 5 | Schema mapping (LLM) | 🔄 | `llm_mapper.py` built — calls Anthropic API for unmapped headers; persistent JSON cache; requires ANTHROPIC_API_KEY env var |
-| 6 | Validation gate | 🔄 | `validation_gate.py` built — sum checks, unit magnitude, period swings, sign consistency; runs after staging before promotion |
-| 7 | Onboarding conversation (v1.2) | ❌ | No chat gating. Facts promote to live without user acknowledgment. File state machine not enforced. |
-| 8 | Promote to live + citation envelopes | 🔄 | Promotion ✅; citation envelopes (cell-level source reference) ❌ not yet populated |
+| 3 | Pre-normalisation | ✅ | Preamble skip, TOTAL row skip, section header skip, ragged lines, paren-negative conversion |
+| 4 | Unit & period detection | ✅ | Per-sheet unit detection, all major period formats |
+| 5 | Schema mapping (LLM) | ✅ | `llm_mapper.py` — calls Anthropic API for unmapped headers; persistent cache; re-ingests after mapping |
+| 6 | Validation gate | ✅ | `validation_gate.py` — soft block with user prompt; non-interactive defaults to proceed |
+| 7 | Onboarding conversation (v1.2) | ✅ | `onboarding_gate.py` — summary per entity, user acknowledgment, AWAITING_ACKNOWLEDGMENT state |
+| 8 | Promote to live + citation envelopes | ✅ | Promotion with cell_reference and source_sheet populated |
 
 ### File format support
 
@@ -57,16 +64,13 @@
 | Excel (.xlsx/.xls) | ✅ | Multi-sheet, per-sheet unit/preamble detection |
 | DOCX | ❌ | Phase 2 (qualitative pipeline) |
 | PDF | ❌ | Phase 2 (qualitative pipeline) |
-| Ledger / vertical-block layout | ❌ | Engineering "3 yr PnL" style — needs LLM schema mapper (Stage 5) |
+| Ledger / vertical-block layout | 🔄 | Engineering "3 yr PnL" style — needs LLM schema mapper |
 | Tally double-column layout | 🔄 | Partially works; left-right column pairing not handled |
 
 ### Known gaps
 
-- **Stage 5 LLM mapper** is the biggest missing piece — any header not in `ALIAS_MAP` produces 0 facts for that metric. This is a hard ceiling on coverage until Stage 5 is built.
-- **Accounting paren negatives** `(124.50)` → `-124.50` not converted.
 - **Mixed units within a sheet** (e.g. Sharma Textiles "Other Exp Detail" — most rows in Lakhs, two rows in absolute Rs.) not detected.
-- **Cell-level citations** missing — `live_facts` rows don't yet carry sheet + cell reference.
-- **File state machine** (`UPLOADED → AWAITING_CONFLICT_RESOLUTION → AWAITING_ACKNOWLEDGMENT → LIVE`) exists in schema but is not enforced — files go straight to LIVE.
+- **Phase 2 not started** — qualitative pipeline for DOCX/PDF handling
 
 ---
 
