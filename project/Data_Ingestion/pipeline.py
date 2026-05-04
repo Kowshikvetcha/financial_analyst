@@ -109,7 +109,7 @@ def _resolve_conflicts_interactive(conn, entity_name: str, entity_id: int) -> No
             print(f"  Please enter a number between 1 and {len(c.options)}.")
 
 
-def run_pipeline(mock: bool = False) -> None:
+def run_pipeline(mock: bool = False, skip_qualitative: bool = False) -> None:
     print("\n" + "=" * 60)
     print("  FINANCIAL AI AGENT — Phase 1 Pipeline")
     print("=" * 60)
@@ -125,6 +125,18 @@ def run_pipeline(mock: bool = False) -> None:
         _run_from_input_files(conn)
 
     print_summary(conn)
+
+    # ── Phase 2 — Qualitative pipeline ─────────────────────────────────────
+    if not skip_qualitative:
+        print("\n" + "=" * 60)
+        print("  Phase 2 — Qualitative Context Pipeline")
+        print("=" * 60)
+        from qualitative import run_qualitative_pipeline
+        result = run_qualitative_pipeline(conn)
+        print(f"\n  Phase 2 complete: {result['files_processed']} files, "
+              f"{result['chunks_total']} chunks")
+        print("  ✓ Phase 2 done.")
+
     conn.close()
 
 
@@ -410,11 +422,13 @@ def print_summary(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 if __name__ == "__main__":
+    skip_qualitative = "--skip-qualitative" in sys.argv
+
     if "--report-only" in sys.argv:
         conn = get_connection()
         print_summary(conn)
         conn.close()
     elif "--mock" in sys.argv:
-        run_pipeline(mock=True)
+        run_pipeline(mock=True, skip_qualitative=skip_qualitative)
     else:
-        run_pipeline(mock=False)
+        run_pipeline(mock=False, skip_qualitative=skip_qualitative)

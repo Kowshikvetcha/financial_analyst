@@ -1,0 +1,300 @@
+Product Requirements Document
+Project: Deterministic Financial AI Co-Pilot
+Version: 1.2 (Revised — Chatbot UX)
+Architecture Focus: Hybrid Local-First (Zero Cloud DB)
+Changes in v1.1 and v1.2
+v1.1 incorporated findings from a corpus review of five representative input files (Glow Naturals monthly P&L, Sharma Textiles four-year financials, Krishnan Engineering three-year P&L, ZenithOps data room workbook, and ZenithOps CIM). It elevated ingestion, reconciliation, and citation lineage to first-class architectural concerns and added §5, §6, and §7.
+v1.2 reshapes the human-in-the-loop UX to fit a chatbot product targeted at non-technical users. The standalone Ingestion Review screen from v1.1 is removed; in its place, ingestion produces an Onboarding Conversation — the bot's first chat message after a file is uploaded, surfacing every interpretation decision in plain language and asking blocking questions for genuine cross-source conflicts. Facts remain non-queryable until the user acknowledges this onboarding message. The ingestion pipeline (§5), citation envelope (§6), and tool surface (Phase 3) are unchanged from v1.1 — only the human-facing layer changes.
+v1.1 revisions appear in YELLOW callouts. v1.2 revisions appear in ORANGE callouts. v1.0 content is preserved verbatim. Where v1.2 supersedes v1.1, the v1.1 text is struck through and the v1.2 text follows.
+1. Executive Summary
+This document outlines the architecture, constraints, and development roadmap for an AI-powered financial intelligence system designed for accurate Private Equity analysis. The system enables users to upload heterogeneous financial documents (CSVs, Excel files, PDFs) and interrogate the data using natural language.
+Crucially, the system acts as a deterministic translator, not a calculator. To achieve zero hallucination on financial metrics and maintain strict data privacy, it employs a hybrid architecture: all data processing, storage, and metric calculations occur strictly locally, while an enterprise cloud LLM acts merely as an orchestrator and natural language interface via secure API calls.
+REVISION v1.1 — 
+Corpus review confirms the architecture's premise but reveals that the hardest engineering work sits in the path between "raw uploaded file" and "clean DuckDB row." Real-world inputs mix units within a single sheet, contradict themselves across sheets, and embed semantically critical context inside free-text notes that the original PRD's qualitative/quantitative split would route into ChromaDB and lose. The revised PRD elevates ingestion, reconciliation, and human-in-the-loop review from one-bullet items in Phase 1 to first-class architectural concerns.
+2. Core Principles & Guardrails
+ZERO LLM MATH
+: Generative AI models are strictly prohibited from performing mathematical calculations. All financial aggregations, ratios (e.g., EBITDA, IRR), and variances are executed by deterministic Python tools.
+Data Privacy & Residency
+: Raw financial data must never be uploaded to cloud storage or databases. Only specific, sanitized tool schemas and outputs are sent to the LLM API.
+Agentic RAG
+: Semantic search (RAG) is reserved exclusively for qualitative textual context (MD&A, footnotes). Hard numbers are retrieved via text-to-SQL logic.
+Traceability
+: Every AI-generated assertion must include a direct citation to the underlying data source (e.g., DuckDB table row or ChromaDB PDF chunk).
+REVISION v1.1 — 
+Two added principles, and one sharpened. (1) NO FREE-FORM SQL FROM THE LLM — "Zero LLM Math" leaks if the model writes SQL like SELECT SUM(revenue) * 0.7. Tools must expose parameterized functions only (fetch_metric, calculate_variance, calculate_ratio); raw SQL strings from the LLM are rejected by the orchestrator. (2) UNIT-EXPLICIT STORAGE — every numeric value in DuckDB carries its unit as a first-class column (INR_lakhs, INR_crore, INR_absolute, USD_thousands). Cross-unit operations require explicit conversion and are logged. (3) RECONCILE-THEN-ANSWER — when two ingested sources disagree on the same metric within tolerance, the system surfaces the conflict before answering, rather than silently picking one.
+(NEW) No Free-Form SQL from the LLM
+: Tools expose parameterized function signatures only. The LLM cannot emit raw SQL. This closes the calculation-by-proxy loophole.
+(NEW) Unit-Explicit Storage
+: Every fact row in DuckDB carries (value, unit, original_unit, conversion_applied). No "naked numbers."
+(NEW) Reconcile-Then-Answer
+: Cross-source contradictions on the same (entity, metric, period) tuple are flagged at ingest and surfaced at query time, not silently resolved.
+3. Target Architecture & Tech Stack
+Component
+Selected Technology
+Purpose
+Data Processing
+Python (Polars, PyMuPDF)
+Local parsing and rapid normalization of tabular and unstructured files.
+Structured Engine
+DuckDB
+Local, in-process OLAP SQL database for pre-calculated metrics.
+Context Engine
+ChromaDB / FAISS
+Local vector store for PDF embeddings to enable semantic retrieval.
+Orchestration
+LangChain / AutoGen
+Local framework managing AI tool calls, routing, and conversational memory.
+Reasoning Layer
+Enterprise Cloud API (e.g., GPT-4o, Claude 3.5)
+Interprets intent and formats tool outputs into plain English (Zero-day retention).
+User Interface
+Streamlit
+Local web frontend for drag-and-drop file ingestion and chat interactions.
+REVISION v1.1 — 
+Two components added to the stack, reflecting the load-bearing role of ingestion. (a) Schema-Mapping LLM — a separate, small-context LLM call dedicated to proposing column→canonical-field mappings for each new file, with deterministic validation gates. This is distinct from the conversational reasoning layer. (b) Reconciliation Engine — a deterministic Python module that compares facts across source documents at ingest time and emits a conflict report. Both run locally.
+Component (NEW)
+Selected Technology
+Purpose
+Schema Mapper
+Local LLM call + Pydantic validators
+Proposes column-to-canonical-field mappings for new files; validators enforce sum checks, unit consistency, and total reconciliation.
+Reconciliation Engine
+Python (deterministic)
+Compares (entity, metric, period) facts across sources at ingest; produces conflict report consumed by the onboarding conversation.
+Ingestion Review UI (SUPERSEDED in v1.2)
+Streamlit (separate page)
+REMOVED in v1.2 — see Onboarding Conversation Engine below. Kept here for historical traceability.
+Onboarding Conversation Engine (v1.2)
+LLM call + structured templates
+Generates the bot's first chat message after a file is uploaded. Surfaces every interpretation decision in plain language, lists detected sheets and inferred metrics, and asks blocking questions for cross-source conflicts. Acknowledgment unlocks DuckDB facts for queries.
+REVISION v1.2 — 
+The Ingestion Review UI from v1.1 is removed because the product targets non-technical users in a chat-first surface. Its functions move into the Onboarding Conversation Engine, which produces a chat message rather than a separate page. The engine has the same gating responsibility — facts are not queryable until the user acknowledges the message — but the affordance is conversational, not technical.
+4. Phased Implementation Roadmap
+Phase 1: Quantitative Pipeline (Structured DB)
+Goal: 
+Establish local ingestion for hard financial metrics.
+Develop Polars scripts to ingest and clean heterogeneous Excel/CSV files.
+Map disparate row/column headers to a unified financial schema.
+Calculate core KPIs (Margins, Operating Costs) deterministically upon ingestion.
+Land the cleaned data into optimized local DuckDB tables.
+REVISION v1.1 — 
+Phase 1 as written collapses ~6 weeks of work into 4 bullets. Schema unification is not a script; it is a hybrid pipeline. Across the 5-file test corpus, "Revenue" appears as: Net Revenue, Turnover (net of GST), Total Revenue from Operations, Total Revenue, and Sale of products (Domestic) + (Export). Units appear as: INR (absolute), Rs. Lakhs, Rs. Crore, USD thousands, and mixed-within-a-single-sheet. Negatives appear as both -186 and (124.50). Time periods span Apr-23, FY 2023-24, 31-Mar-2024, Q1'22, FY2024A. The expanded Phase 1 below treats this as the central engineering challenge.
+Phase 1 — Expanded Subtasks (REVISED)
+1.1 Canonical Financial Schema
+: Define the DuckDB tables (fact_metrics, dim_entity, dim_period, dim_metric, dim_source) using the 5-file corpus as the test case. Schema must support multi-currency, multi-unit, multi-period-grain (monthly/quarterly/annual) facts.
+1.2 Polars Pre-Normalization
+: Detect and strip title rows, blank separators, total/subtotal rows, and footnote blocks. Detect accounting-paren negatives and convert. Detect mixed-unit rows (e.g., Sharma Textiles "Other Exp Detail") and split.
+1.3 Schema-Mapping LLM Call
+: For each new file, send sheet structure (headers + first 5 rows + detected unit hints) to a local LLM call that proposes a mapping to the canonical schema. Output is a structured JSON proposal, not free text.
+1.4 Deterministic Validators
+: Validate the proposed mapping against hard rules: line items must sum to labeled totals within tolerance; declared units must match values' magnitude (e.g., a "Lakhs" column with values >10,000,000 fails); cross-period growth rates must be sane (-90% to +1000%).
+1.5 Onboarding Gate (REVISED in v1.2)
+: Validated proposals are written to a staging table, NOT directly to DuckDB. The Onboarding Conversation Engine (§7) generates the bot's first chat message describing what was found and what was assumed; user acknowledgment in chat promotes facts from staging to live.
+1.6 Derived KPIs
+: Pre-compute Gross Margin %, EBITDA, EBITDA Margin %, YoY Growth %, and CAGR upon ingest, but only when source rows are sufficient. If derivation is impossible (e.g., D&A not separately disclosed), record NULL with a reason code rather than estimating.
+Phase 2: Qualitative Context Pipeline (Vector DB)
+Goal: 
+Extract and embed unstructured textual data for RAG.
+Implement PyMuPDF layout-aware parsing for K-1s and investment memorandums.
+Chunk text systematically, preserving paragraph and nested table context.
+Generate embeddings via local HuggingFace models or provider APIs, storing them in ChromaDB.
+REVISION v1.1 — 
+The qualitative/quantitative wall leaks in both directions. The ZenithOps CIM (a "qualitative" docx) contains a full P&L table, an ARR build, a cohort retention table, and a Top 20 customer list — all numerical. Glow Naturals' CSV (a "quantitative" file) contains free-text notes ("monsoon dip," "diwali peak," "warehouse shifted to Bhiwandi from Aug") that are essential for variance analysis. Phase 2 must split incoming documents into qualitative chunks (→ ChromaDB) AND structured tables (→ Phase 1 ingestion path), and Phase 1 must capture row-level annotations as linked qualitative context.
+Phase 2 — Added Subtasks (REVISED)
+2.4 Document Bifurcation
+: Before chunking, detect tables in DOCX/PDF inputs (CIMs, K-1s, lender reports). Route detected tables through the Phase 1 ingestion path with the parent document as their source. Route narrative text through ChromaDB.
+2.5 Annotation Capture
+: Free-text notes adjacent to tabular rows (e.g., the "notes" column in Glow Naturals, the "Remarks" column in Krishnan Engineering) are captured as linked qualitative context — embedded in ChromaDB with a hard reference back to the DuckDB row they annotate.
+2.6 Embedded-Number Handling
+: ChromaDB chunks containing numerical claims are tagged. At query time, if RAG returns a chunk with a numerical claim that contradicts a DuckDB-resident fact, the orchestrator must defer to DuckDB and surface the contradiction.
+Phase 3: Deterministic Tool Engineering
+Goal: 
+Build the Python functional safety net.
+fetch_metric(metric, period)
+: Executes precise SQL retrieval against DuckDB.
+calculate_variance(metric, t1, t2)
+: Computes historical differences mathematically.
+search_context(query)
+: Executes semantic search on ChromaDB for qualitative "why" questions.
+Mandatory Testing
+: Implement exhaustive pytest suites ensuring tools fail gracefully on missing data.
+REVISION v1.1 — 
+Tool surface expanded to handle entity disambiguation, unit conversion, and reconciliation, all of which are needed by the corpus. fetch_metric now requires (entity_id, metric, period, unit_out) — no implicit defaults. Tools must return structured results that include the citation envelope defined in §7, not just a number.
+Phase 3 — Expanded Tool Surface (REVISED)
+fetch_metric(entity_id, metric, period, unit_out)
+ — returns {value, unit, citation, as_of}. Raises MetricNotFound or AmbiguousEntity instead of guessing.
+calculate_variance(entity_id, metric, t1, t2)
+ — both periods must exist in DuckDB; partial-data variances return a sentinel, not an estimate.
+calculate_ratio(entity_id, numerator, denominator, period)
+ — explicitly covers margins and ratios so the LLM never assembles them from primitives.
+search_context(entity_id, query, period_filter=None)
+ — returns chunks with citations and a flag indicating whether they contain numerical claims.
+list_sources(entity_id, metric, period)
+ — lists every source document carrying this fact, so the LLM can surface reconciliation conflicts.
+list_available_metrics(entity_id)
+ — answers "what can I ask about this company" deterministically. Prevents the LLM from hallucinating that data exists.
+Phase 4: Agentic Orchestration
+Goal: 
+Connect the LLM router to the local toolkit.
+Configure the orchestrator locally to manage conversational state and tool binding.
+Establish the System Prompt: enforce the router-only persona and prohibit guessing.
+Integrate the Enterprise Developer API, mapping the JSON schemas of Phase 3 tools.
+REVISION v1.1 — 
+Two non-obvious additions. (a) Pre-flight entity resolution — before any tool call, if the user's question contains a company-name reference, resolve it to entity_id via a deterministic lookup and pass the ID, not the name, to tools. This avoids the failure mode where "Krishnan Engineering" matches multiple ingested sources and the LLM picks one. (b) Conflict-aware response template — when list_sources returns multiple sources with disagreeing values, the system prompt mandates a specific response shape that surfaces the disagreement rather than picking the first.
+Phase 4 — Added Subtasks (REVISED)
+4.4 Entity Resolution Pre-flight
+: Names → entity_id resolution happens before tool calls; ambiguous names trigger a clarification, not a guess.
+4.5 Conflict-Aware Templates
+: When the same fact has multiple disagreeing sources, the response must explicitly enumerate them with citations.
+4.6 Tool-Call Audit Log
+: Every tool call (input, output, citation) is logged locally. Enables post-hoc verification of "100% mathematical accuracy" claim.
+Phase 5: User Interface & Integration
+Goal: 
+Deliver a cohesive financial co-pilot experience.
+Deploy the local Streamlit application.
+Integrate background file upload processing triggers (Phases 1 & 2).
+Format LLM responses to render markdown tables, trend charts, and source document citations.
+REVISION v1.1 — 
+Phase 5 needs an explicit Ingestion Review screen (see §7). Without it, every interpretation decision the system makes during ingest is invisible to the user, and "100% mathematical accuracy" becomes technically true while practically wrong. The chat UI also needs a "show your work" affordance: every numerical answer must be expandable to reveal the underlying tool call, the cited cell, and any unit conversions applied.
+REVISION v1.2 — 
+Supersedes the v1.1 callout above. The separate Ingestion Review screen is removed; the disclosure and gating function moves into the Onboarding Conversation produced by the chatbot itself (see §7). Phase 5 now requires: (a) per-file ingestion state machine (UPLOADED → AWAITING_CONFLICT_RESOLUTION → AWAITING_ACKNOWLEDGMENT → LIVE), with the chat orchestrator refusing to answer questions about a file until it reaches LIVE; (b) rendering of the structured onboarding message with collapsible sections for high-disclosure files; (c) chat-native "show your work" expanders for every numerical answer; (d) a reset-source-choices command that returns a file to the conflict-resolution state.
+5. Ingestion & Reconciliation Architecture (NEW)
+REVISION v1.1 — 
+This section is new in v1.1. It exists because Phase 1's "Map disparate row/column headers to a unified financial schema" is one bullet in v1.0 but is, in practice, the load-bearing engineering work for the entire system.
+5.1 Pipeline Stages
+Each uploaded file flows through eight stages before its facts become queryable. Stages 1–4 are deterministic; stage 5 is LLM-assisted with hard validation; stage 6 is human-in-the-loop; stages 7–8 are deterministic.
+#
+Stage
+Determinism
+Output
+1
+File-type detection & checksum
+Deterministic
+File registered with stable hash
+2
+Sheet/section enumeration
+Deterministic
+List of logical regions in the file
+3
+Pre-normalization (strip titles, blanks, totals; convert paren-negatives; detect mixed-unit rows)
+Deterministic
+Clean tabular regions
+4
+Unit & period detection
+Deterministic + heuristics
+Per-region unit and period grain
+5
+Schema mapping proposal (LLM)
+LLM-assisted, validated
+Mapping JSON: source col → canonical field
+6
+Validation gate
+Deterministic
+Pass / Fail with reasons; conflicts identified
+7
+Onboarding message generation (REVISED v1.2)
+LLM-assisted, structured
+Bot's first chat message: every interpretation decision listed; blocking questions for cross-source conflicts
+8
+Land in DuckDB + emit lineage (gated by user acknowledgment in chat)
+Deterministic
+Queryable facts + citation envelopes; locked-in conflict resolutions
+5.2 Cross-Document Reconciliation
+When two sources carry the same (entity, metric, period) tuple, the Reconciliation Engine compares them. Tolerance bands depend on metric class (e.g., revenue 0.5%, EBITDA 1%, headcount exact).
+The Krishnan Engineering file alone illustrates why this matters: its three sheets report FY24 net turnover as 114.24 Cr (owner narrative), 134.24 Cr (Tally export, Domestic + Export), and 124.28 Cr (top-customers ledger). All three are present in the same uploaded file. Without reconciliation, the system silently picks one and reports it as fact.
+5.3 Reconciliation Outcomes
+Within tolerance
+ — pick the highest-priority source (audited > tally > narrative > customer-ledger), record alternates as cross-references.
+Outside tolerance
+ — flag as conflict; the fact is ingested with a conflict marker; queries surface the disagreement at response time.
+Single source
+ — record source rank so future uploads can trigger reconciliation.
+6. Citation & Lineage Data Model (NEW)
+REVISION v1.1 — 
+v1.0 says "every AI-generated assertion must include a direct citation" but does not specify what a citation contains. This section defines the citation envelope used by all Phase 3 tools.
+6.1 Citation Envelope
+Every numerical fact returned by a tool carries a citation envelope with the following fields:
+Field
+Type
+Example
+source_file
+string
+Sharma_Textiles_Financials_FY24_v3_FINAL_revised.xlsx
+sheet
+string
+Other Exp Detail
+cell
+string (A1 ref)
+B8
+row_label
+string
+Legal & Professional (in Rs.)
+column_label
+string
+FY24
+original_value
+string (verbatim)
+2845000
+original_unit
+enum
+INR_absolute
+normalized_value
+decimal
+28.45
+normalized_unit
+enum
+INR_lakhs
+transformation
+string
+divide by 100000 per sheet footnote
+mapping_proposed_by
+enum
+schema_mapper_llm
+mapping_approved_by
+string
+user@firm.com
+ingested_at
+timestamp
+2025-04-15T10:31:22Z
+confidence
+enum
+high / medium / low
+conflicts_with
+array<citation_id>
+[c_4471]
+6.2 Why Cell-Level Granularity Matters
+Sheet-level or row-level citations are not enough. In Sharma Textiles' Other Exp Detail sheet, two of fourteen rows are stored in absolute Rupees while the rest are in Lakhs, and the sheet's own "Total" cell is computed wrongly because it sums across mixed units. A citation at the cell level lets the system answer "Why does this number look strange?" with the actual transformation applied — not just the source file.
+6.3 Lineage for Derived Metrics
+Derived metrics (Gross Margin %, EBITDA, CAGR) carry composite citations: a list of input citations plus the deterministic formula applied. EBITDA is never "from the LLM." It is always "= Operating Income + D&A, sourced from cells X and Y, formula version v1."
+7. Ambiguity Surface UX (Chat-Native — REWRITTEN in v1.2)
+REVISION v1.1 — 
+v1.1 framed this as a separate Ingestion Review screen. That worked for technical analysts but not for the chatbot product targeted at non-technical users.
+REVISION v1.2 — 
+v1.2 replaces the review screen with an Onboarding Conversation: the bot's first chat message after a file is uploaded. The bot opens the conversation by describing every interpretation decision it made, then asks blocking questions for any genuine cross-source conflict. The user resolves conflicts in chat (with their answer locked in for the rest of the session) and acknowledges the rest. Only after acknowledgment do facts become queryable. This preserves v1.1's audit trail and approval gating while making the experience accessible to a non-technical user.
+7.1 Onboarding Message — Required Sections
+Every uploaded file produces an onboarding message with the following sections in order. The message is plain language, not technical jargon, but every claim it makes carries an underlying citation envelope that the user can expand.
+#
+Section
+Purpose
+User action
+1
+What I found
+Lists the file's detected sheets/regions and what type of content each contains (P&L, balance sheet, customer list, narrative, KPI table).
+None — informational
+2
+What I assumed
+Surfaces every confident interpretation: unit conversions, paren-negative parsing, total-row stripping, mixed-unit row splitting, period mapping ("FY 2023-24" → FY24 ending Mar 2024).
+None — informational
+3
+What I derived
+Lists derived metrics computed deterministically (Gross Margin %, EBITDA, CAGR, YoY Growth %), with the source rows used.
+None — informational
+4
+What I need from you
+Lists every cross-source conflict and any low-confidence mapping. Blocks until answered.
+REQUIRED — answer each question
+5
+Acknowledge & proceed
+A single confirmation prompt ("ok" / "go ahead" / "looks good") that promotes facts from staging to queryable.
+REQUIRED — acknowledgment
+7.2 Conflict Resolution Policy (v1.2)

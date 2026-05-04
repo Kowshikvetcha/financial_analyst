@@ -12,17 +12,21 @@ financial_analyst/
 ├── project/
 │   ├── Data_Ingestion/            # Phase 1 ingestion engine
 │   │   ├── mock_data/             # Generated test CSV files
+│   │   ├── chromadb_data/         # Phase 2 ChromaDB DuckDB-persisted vectors
 │   │   ├── pipeline.py            # Orchestrator entry point
-│   │   ├── schema.py              # DuckDB schema + helpers
+│   │   ├── schema.py              # DuckDB schema + helpers (incl. Phase 2 qualitative_chunks)
 │   │   ├── canonical_fields.py    # Metric registry + alias map
-│   │   ├── file_reader.py         # File reading + layout detection
+│   │   ├── file_reader.py         # File reading + layout detection + Phase 2 inline annotations
 │   │   ├── units.py               # Unit normalisation
 │   │   ├── periods.py             # Period string normalisation
 │   │   ├── conflict_resolver.py   # Conflict detection + promotion
 │   │   ├── generate.py            # Mock data generator
 │   │   ├── llm_mapper.py          # Stage 5 — LLM schema mapper
 │   │   ├── validation_gate.py     # Stage 6 — Validation gate
-│   │   └── onboarding_gate.py     # Stage 7 — Onboarding gate
+│   │   ├── onboarding_gate.py     # Stage 7 — Onboarding gate
+│   │   ├── embeddings.py           # Phase 2 — sentence-transformer singleton (all-MiniLM-L6-v2)
+│   │   ├── qualitative.py         # Phase 2 — full qualitative pipeline (PDF/DOCX → ChromaDB)
+│   │   └── test_qualitative.py    # Phase 2 unit tests
 │   ├── input_files/               # Drop real files here to ingest
 │   ├── example_input_files/       # Reference example files (do not modify)
 │   └── requirements.txt
@@ -75,6 +79,7 @@ python pipeline.py --report-only # print live_facts summary only
 | `live_facts` | Validated, query-ready facts with stable `fact_id` |
 | `conflicts` | Cross-source disagreements awaiting resolution |
 | `ingestion_log` | Full audit trail |
+| `qualitative_chunks` | Phase 2 — chunk metadata for PDF/DOCX text (ChromaDB vector metadata) |
 
 **Key functions:**
 - `get_connection(db_path)` — DuckDB connection
@@ -82,6 +87,8 @@ python pipeline.py --report-only # print live_facts summary only
 - `get_or_create_entity(conn, name)` — upserts company row
 - `register_file(conn, entity_id, filename, file_path, file_type, detected_unit, sheet_name)` — inserts source_files row; `sheet_name` used for Excel sheet citation
 - `update_file_state(conn, file_id, state)` — advances file state machine
+- `register_qualitative_file(conn, entity_id, filename, file_path, file_type, checksum)` — Phase 2; inserts source_files row for PDF/DOCX with state=REGISTERED
+- `get_qualitative_chunks(conn, entity_id, chunk_ids)` — Phase 2; fetches chunk metadata from DuckDB (not ChromaDB vectors)
 
 **State machine:** `UPLOADED → SCHEMA_MAPPED → AWAITING_CONFLICT_RESOLUTION → LIVE`
 (Note: full enforcement not yet implemented — files go straight to LIVE after pipeline run)
@@ -125,6 +132,7 @@ python pipeline.py --report-only # print live_facts summary only
 | `extract_tall(df, file_id, entity_id, unit_spec_str)` | Extracts from tall format (rows=periods, cols=metrics) |
 | `write_to_staging(conn, facts)` | Bulk inserts into `staging_facts` |
 | `ingest_file(conn, file_path, file_id, entity_id, confirmed_unit, sheet_name)` | Full pipeline for one sheet; returns summary dict |
+| `extract_inline_annotations(df, file_id, entity_id)` | Phase 2 bridge — detects note/annotation/remark/comment columns and writes to `qualitative_chunks` |
 
 **Returns from `ingest_file`:**
 `{file_id, layout, detected_unit, unit_used, entity_name_detected, facts_staged, rows_processed, unmapped_headers}`
@@ -267,7 +275,7 @@ Reference files used to validate the ingestion engine. Do not modify.
 | `Sharma_Textiles_Financials_FY24_v3_FINAL_revised.xlsx` | M/s Sharma Textiles | P&L, Other Exp Detail, Balance Sheet | Different units per sheet (Lakhs vs Crore), mixed units within a sheet |
 | `Engineering_company_3yr_pnl_AS_PROVIDED_by_owner.xlsx` | M/s Krishnan Engineering | 3 yr PnL, Tally export, Top customers | Ledger format (3yr PnL sheet — 0 facts, needs LLM mapper) |
 | `ZenithOps_Financials_DataRoom.xlsx` | ZenithOps Inc. | 5 sheets | USD thousands, FY2020A/E/P periods, Q1'22 quarters, SaaS metrics |
-| `ZenithOps_CIM_Project_Atlas.docx` | ZenithOps Inc. | — | Phase 2 (qualitative) — not yet handled |
+| `ZenithOps_CIM_Project_Atlas.docx` | ZenithOps Inc. | — | Phase 2 — 132 chunks indexed into ChromaDB `chunks_zenithops_project_atlas` collection |
 
 ---
 
@@ -304,4 +312,8 @@ Root-level `financial_agent.duckdb` is stale — ignore it.
 | `pandas` | 2.2.0 | DuckDB result handling |
 | `numpy` | 1.26.4 | Numerical operations |
 | `openpyxl` | 3.1.5 | Excel reading (openpyxl engine + sheet enumeration) |
-| `fastexcel` | — | Calamine engine required by newer Polars for Excel reading |
+| `sentence-transformers` | 3.3.1 | Phase 2 — local sentence embeddings (all-MiniLM-L6-v2, 384-dim) |
+| `chromadb` | 0.5.0 | Phase 2 — local vector DB with DuckDB persistence (no server) |
+| `pymupdf` | 1.24.11 | Phase 2 — PDF text extraction |
+| `pdfplumber` | 0.11.4 | Phase 2 — PDF table extraction fallback |
+| `python-docx` | 1.1.2 | Phase 2 — DOCX text + table extraction |

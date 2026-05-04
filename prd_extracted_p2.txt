@@ -1,0 +1,172 @@
+When the same (entity, metric, period) tuple has values from multiple sources that differ beyond tolerance, the bot must ask the user once during onboarding. Their answer is locked in for the entire session: subsequent queries about that metric never re-prompt. The locked-in choice is recorded in the citation envelope of every answer involving that metric, so the user can always see which source they chose.
+If the user later wants to change the source-of-truth choice, they must re-upload the file or explicitly invoke a "reset source choices" command.
+If the same conflict appears in a future session, the bot does NOT remember the prior choice — onboarding starts fresh. (This is intentional: stale choices are dangerous.)
+If the user cannot decide and wants to see all values, the bot offers a "show all" option that displays every conflicting value with its citation in every relevant answer, instead of picking one.
+7.3 Confident-Decision Disclosure Policy (v1.2)
+Every confident interpretation decision — even ones the bot would handle without asking — is listed in the onboarding message. The user does not need to act on these (no questions are asked), but they are visible. This is the per-user-preference choice locked in at PRD level: full disclosure over silent application.
+Unit conversions (Lakhs → Crore, INR absolute → Lakhs, etc.) are listed individually.
+Paren-negative parsing is listed once per sheet where it occurred, with one example cell.
+Total/subtotal rows that were stripped are listed by row label.
+Mixed-unit row splits (e.g., Sharma Textiles' Other Exp Detail) are listed with the rows that were treated differently.
+Period normalization is listed once per detected period grain.
+If the message exceeds ~30 disclosure items, items are grouped into expandable categories ("15 unit conversions — tap to expand") to avoid overwhelming the user. Default state is collapsed for groups, expanded for individual items.
+7.4 Worked Example: Glow Naturals CSV
+The following is the bot's onboarding message for Glow_Naturals_monthly_pnl_2023_24.csv. It is reproduced verbatim to demonstrate the tone, density, and structure expected. Every numeric reference in the message is backed by a citation envelope (§6) that the user can expand.
+Hi! I've finished reading Glow_Naturals_monthly_pnl_2023_24.csv. Here's what I found and what I assumed before I'm ready to answer questions.
+WHAT I FOUND
+• A monthly P&L for Glow Naturals from April 2023 to March 2024 (12 months).
+• 14 line items per month: GMV, returns/refunds, Net Revenue, COGS, gross margin, marketing spend, marketplace fees, salary, rent + utilities, packaging, logistics, other, EBITDA, and notes.
+• A footer with 4 narrative notes about cost structure changes and 2 pre-calculated metrics (gross margin %, EBITDA margin %).
+WHAT I ASSUMED
+• Currency: INR (per the file's units disclaimer at the top).
+• All values stored in absolute Rupees (no Lakhs/Crore conversion needed).
+• Stripped 1 title row, 2 blank separator rows, and the TOTAL row (treated as a check, not data) before loading the 12 monthly rows.
+• The cell value "67.0% (calc)" in the gross margin % field — I read this as 67.0% and treated "(calc)" as an annotation, not part of the value.
+• Period grain: monthly. Mapped each month label (e.g., "Apr-23") to a period (FY24 M01 ending 30-Apr-2023).
+• Captured the 4 footer notes as qualitative context linked to specific periods: monsoon dip (Jun), salary step-up (Oct, Feb), warehouse rent step-up (Aug), festive seasonality (Oct–Dec). I'll surface these when you ask about variances in those months.
+• Captured the inline "notes" column for each month (e.g., "diwali peak" for Nov).
+WHAT I DERIVED
+• Annual EBITDA: ₹75.85 lakhs (sum of monthly EBITDA, matches the file's TOTAL row at ₹7,585,000).
+• Annual Gross Margin: 67.0% (matches the file's pre-calculated value).
+• Annual EBITDA Margin: 16.4% (matches the file's pre-calculated value).
+• MoM and YoY growth rates per metric (YoY would need a prior-year file).
+WHAT I NEED FROM YOU
+• Nothing — no conflicts detected. The file's footer notes that it is "not yet audited." I'll flag this caveat in any answer that uses these numbers in a serious context.
+Reply "ok" or "go ahead" and I'll start answering questions about Glow Naturals.
+7.5 Worked Example: Krishnan Engineering xlsx (Conflict Case)
+This file is the conflict-detection canonical case. Three sheets disagree on FY24 net turnover. The bot must surface this and ask once. Reproduced verbatim:
+Hi! I've finished reading Engineering_company_3yr_pnl_AS_PROVIDED_by_owner.xlsx. Before I can answer questions, I need to ask one thing — but first here's what I found.
+WHAT I FOUND
+• 3 sheets in completely different formats: a 3-year owner-summary P&L, a Tally Prime export for FY24, and a top-customers list for FY24.
+• Company: Krishnan Engineering Works Pvt Ltd.
+• Periods covered: FY22, FY23, FY24 (Indian fiscal years ending March).
+WHAT I ASSUMED
+• The owner summary uses Rs. Crore for most values; some cells contain qualifications ("approx", "slight rounding") that I parsed as values with low-confidence flags.
+• The Tally export uses absolute Rupees in a Dr/Cr ledger layout. I converted to Crore for consistency with the owner summary.
+• The customer list uses absolute Rupees and decimals for percentages (e.g., 0.148 = 14.8%).
+• The Tally export's Dr and Cr totals don't balance (959.22 Cr vs 1,371.04 Cr) — this looks like an incomplete export. I've flagged it but used the line items rather than the totals.
+WHAT I DERIVED
+• 3-year turnover, COGS, gross margin, PBT, PAT (per the owner summary).
+• Customer concentration (Top 10 = 60% of FY24 revenue per the customer list).
+• I cannot derive EBITDA cleanly because the owner summary doesn't separate D&A from other line items in a consistent way across years. I'll only return EBITDA if you ask for a specific year where the data is clean.
+WHAT I NEED FROM YOU — 1 question
+• Three sheets in this file report FY24 net turnover differently:
+  – ₹114.24 Cr — owner's 3-year summary, marked "net of GST"
+  – ₹134.24 Cr — Tally export (Domestic ₹124.84 Cr + Export ₹9.40 Cr)
+  – ₹124.28 Cr — customer-list total
+  Which should I use as FY24 turnover for this session?
+    [A] Owner summary (₹114.24 Cr)
+    [B] Tally export (₹134.24 Cr)
+    [C] Customer list (₹124.28 Cr)
+    [D] Show all three in every answer (no single source-of-truth)
+Once you answer, your choice is locked in for this session and used in every relevant answer with full citation. You can re-upload the file to reset.
+7.6 The "Show Your Work" Affordance in Chat
+Every numerical answer in the chat UI is expandable. Expanding reveals: (1) the tool call that produced it, (2) the citation envelope of every input, (3) any unit conversions, (4) the formula applied for derived metrics, (5) reconciliation status ("sourced from option [B] you chose during onboarding"). For non-technical users, the expansion is rendered as a friendly explanation, not raw JSON: "This came from cell B8 of the 'Other Exp Detail' sheet, where the value 2,845,000 was in absolute Rupees — I converted to ₹28.45 Lakhs to match the rest of the sheet."
+7.7 Acknowledgment & State Transitions
+The chat interface tracks ingestion state per file:
+State
+Bot behavior
+User can ask questions?
+UPLOADED
+Working — generating onboarding message
+No — bot replies "still reading the file, give me a moment"
+AWAITING_CONFLICT_RESOLUTION
+Onboarding message sent; waiting for answers to blocking questions
+No — bot redirects to the open question
+AWAITING_ACKNOWLEDGMENT
+Conflicts resolved; waiting for user to confirm
+No — bot redirects to the acknowledgment prompt
+LIVE
+Facts queryable; normal Q&A operation
+Yes
+RESET
+User invoked source-choice reset; back to AWAITING_CONFLICT_RESOLUTION
+No
+7.8 Edge Cases the Onboarding Engine Must Handle
+User uploads a second file mid-session: each file gets its own onboarding message; cross-file conflicts (e.g., same company, different sources) are surfaced in the second file's onboarding.
+User skips/ignores the blocking question and asks something else: bot must NOT answer; instead, it gently redirects to the unanswered question.
+Validation fails (totals don't reconcile, units indeterminate): bot says so plainly and asks the user to upload a corrected version, rather than guessing.
+Onboarding message would exceed ~30 disclosure items: items group into expandable categories. Conflicts (the blocking section) never collapse.
+User answers a conflict question with something unparseable ("both" / "whatever" / off-topic): bot re-asks once, then asks them to choose A/B/C/D explicitly.
+8. Success Metrics & UAT
+User Acceptance Testing will be conducted against a "golden dataset" of historic documents. Success is defined by:
+Accuracy
+: 100% mathematical accuracy on explicitly requested numerical KPIs.
+Latency
+: End-to-end response times under 15 seconds.
+Reliability
+: The system must explicitly state when a document does not contain the required data, rather than estimating.
+REVISION v1.1 — 
+Two metrics sharpened, three added. (a) Accuracy is reframed as accuracy on approved facts; pre-approval staging facts are not in scope. (b) Latency is tiered by query class — simple lookups under 3s, derived metrics under 8s, multi-source reconciled answers under 15s. (c) Three new metrics: Ingestion Fidelity (% of test-corpus files where mapping is approved without human correction), Conflict Surfacing (% of seeded cross-source conflicts that the system flagged), and Hallucination Rate (% of responses containing any number not traceable to a citation envelope; target = 0%).
+REVISION v1.2 — 
+v1.2 adjustments. Accuracy is reframed against the user-acknowledged onboarding state, not a separate approval. Ingestion Fidelity is split into two: Auto-Onboarding Rate (% of files where the bot's onboarding message has zero blocking questions — pure disclosure, no conflicts) and Conflict Resolution Quality (whether the bot's conflict question was the right one to ask). Adds Onboarding Completion Rate (% of upload sessions where the user successfully reaches LIVE state, vs. abandoning at the conflict-question stage), which is the v1.2 product-health metric.
+8.1 Sharpened & Added Metrics (REVISED)
+Metric
+Definition
+Target
+Accuracy (revised v1.2)
+Mathematical correctness on KPIs derived from facts that have reached LIVE state (user acknowledged the onboarding message). Pre-acknowledgment facts are out of scope.
+100%
+Latency — Simple
+Single fetch_metric call, no reconciliation.
+< 3 seconds
+Latency — Derived
+Includes calculate_ratio, calculate_variance, or single-source RAG.
+< 8 seconds
+Latency — Reconciled
+Multi-source query requiring conflict surfacing or cross-document RAG.
+< 15 seconds
+Onboarding Latency (NEW v1.2)
+Time from file upload to the bot's onboarding message being visible.
+< 30 seconds for files ≤ 1 MB
+Reliability (unchanged)
+System refuses to estimate when data is absent.
+100% refusal rate
+Auto-Onboarding Rate (REVISED v1.2)
+% of files where the onboarding message contains zero blocking conflict questions (only disclosure).
+≥ 60% of corpus
+Conflict Surfacing (unchanged)
+% of seeded cross-source conflicts the system flags during onboarding.
+100%
+Onboarding Completion Rate (NEW v1.2)
+% of upload sessions where the user successfully reaches LIVE state (didn't abandon at the conflict-question stage).
+≥ 90%
+Hallucination Rate (NEW)
+% of responses containing a number not traceable to a citation envelope.
+0%
+Citation Coverage (NEW)
+% of numerical claims in responses with a valid citation envelope.
+100%
+8.2 Test Corpus
+The five-file review corpus (Glow Naturals CSV, Sharma Textiles xlsx, Krishnan Engineering xlsx, ZenithOps data room xlsx, ZenithOps CIM docx) becomes the seed of the golden dataset. Each file's known interpretation decisions, unit conversions, and cross-source conflicts are catalogued and used as ground truth for the Ingestion Fidelity and Conflict Surfacing metrics.
+Appendix A — Corpus-Driven Edge Cases
+This appendix is new in v1.1. It catalogues the specific edge cases in the five-file review corpus that drove each revision in this document. Engineers building the ingestion pipeline should treat this as the minimum set of cases the pipeline must handle.
+A.1 Glow Naturals — monthly P&L CSV
+Title row + units disclaimer prepended to data.
+TOTAL row interleaved with monthly time-series data.
+Inline metric annotation: "67.0% (calc)" — value fused with provenance comment.
+Free-text "notes" column carrying variance explanations ("monsoon dip," "diwali peak").
+Footer NOTES describing structural changes mid-year (rent step-up, salary step-up) — material to variance analysis but easily lost to ChromaDB.
+A.2 Sharma Textiles — FY24 financials xlsx
+Three sheets, three different units: Lakhs (P&L), Crore (Balance Sheet), mixed Lakhs/absolute Rupees (Other Exp Detail).
+Accounting parens for negatives: (8.20), (124.50).
+Sheet's own Total cell computed wrongly because it sums mixed-unit rows.
+Four-year comparatives in one sheet — implicit period mapping required.
+Footnote about Rs. 1.20 Cr disputed receivable — material qualitative context attached to a specific Balance Sheet line.
+A.3 Krishnan Engineering — 3-year P&L xlsx
+Three sheets in three completely different formats: owner narrative, Tally export, customer ledger.
+Owner-narrative cells contain prose: "Rs. 84.5 Cr (incl. GST)," "approx 22%," "slight rounding."
+Tally export uses a two-column Dr/Cr ledger layout in the same row — not standard tabular.
+Tally totals do not balance (959.22 Cr Dr vs 1371.04 Cr Cr) due to incomplete export.
+Three internally inconsistent FY24 net turnover values across the three sheets — the canonical reconciliation test case.
+A.4 ZenithOps — financials data room xlsx
+Percentages stored as raw decimals (0.698 for 69.8%) — column-level type inference required.
+Row label embeds metadata: "Tax expense (21%)" mixes the rate into the line-item name.
+FY2025E mixes 11 months actuals + 1 month forecast under a single column — query response should disclose the basis.
+Cohort table uses triangular layout with empty future-year cells.
+Top 20 customer table includes a summary row ("Top 20 % of Total ARR") that is statistic, not data.
+A.5 ZenithOps — CIM docx
+Embedded P&L, ARR build, cohort retention, and Top 20 customer tables — all numerical content inside a "qualitative" document.
+Currently consistent with the data-room xlsx, but versions will drift in real PE workflows.
+Qualitative narrative around the tables (e.g., "Rule of 40 reading at Q4 FY2025 stands at 65%") restates numbers from the tables — RAG will surface these and may contradict DuckDB-resident facts.
+Customer names anonymized as Customer A–T — entity resolution must not attempt to map them to real names.

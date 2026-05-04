@@ -14,3 +14,10 @@ pydantic==2.13.3        # Data models and validation (used in Phase 3 tool layer
 # Data output
 pandas==2.2.0           # For dataframe manipulation and DuckDB .df() results
 numpy==1.26.4
+
+# Phase 2 — Qualitative pipeline
+sentence-transformers==3.3.1   # Local embeddings: all-MiniLM-L6-v2, 384-dim, ~90 MB
+chromadb==0.5.0                 # Vector DB with DuckDB persistence (no server)
+pymupdf==1.24.11                # PDF text extraction (fitz module)
+pdfplumber==0.11.4              # PDF table extraction (fallback)
+python-docx==1.1.2             # DOCX text + table extraction

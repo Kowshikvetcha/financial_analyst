@@ -170,6 +170,29 @@ def initialise_schema(conn: duckdb.DuckDBPyConnection) -> None:
         )
     """)
 
+    # ── Qualitative chunks (Phase 2) ───────────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS qualitative_chunks (
+            chunk_id                INTEGER PRIMARY KEY,
+            file_id                 INTEGER REFERENCES source_files(file_id),
+            entity_id               INTEGER REFERENCES entities(entity_id),
+            chunk_index             INTEGER NOT NULL,
+            region_type             TEXT NOT NULL,
+                -- footer_notes | inline_annotation | narrative | table
+            chunk_type              TEXT NOT NULL,
+                -- narrative | footnote | caption | table
+            section_path            TEXT,
+            linked_fact_ids         TEXT,            -- JSON array
+            linked_periods          TEXT,            -- JSON array
+            linked_metrics          TEXT,            -- JSON array
+            contains_numerical_claim BOOLEAN NOT NULL DEFAULT FALSE,
+            numerical_claims        TEXT,             -- JSON array of {number, type, context}
+            raw_text                TEXT,
+            chroma_document_id      TEXT,            -- NULL for inline annotations
+            created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     print("OK DuckDB schema initialised")
 
@@ -269,3 +292,69 @@ def get_files_needing_acknowledgment(conn: duckdb.DuckDBPyConnection) -> list[in
         "SELECT file_id FROM source_files WHERE state = 'AWAITING_ACKNOWLEDGMENT'"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+# ── Phase 2 — Qualitative helpers ───────────────────────────────────────────
+
+def register_qualitative_file(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: int,
+    filename: str,
+    file_path: str,
+    file_type: str,          # 'pdf' or 'docx'
+    checksum: Optional[str] = None,
+) -> int:
+    """
+    Insert a source_files row for a qualitative (PDF/DOCX) file.
+    State starts as REGISTERED; updated to LIVE after chunking.
+    """
+    if checksum is None:
+        p = Path(file_path)
+        if p.exists():
+            checksum = compute_sha256(p)
+
+    conn.execute("""
+        INSERT INTO source_files (entity_id, filename, file_path, file_type, checksum, state)
+        VALUES (?, ?, ?, ?, ?, 'REGISTERED')
+    """, [entity_id, filename, file_path, file_type, checksum])
+    conn.commit()
+    row = conn.execute(
+        "SELECT file_id FROM source_files ORDER BY file_id DESC LIMIT 1"
+    ).fetchone()
+    return row[0]
+
+
+def get_qualitative_chunks(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: int,
+    chunk_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """
+    Fetch chunk metadata from DuckDB (not the ChromaDB vectors).
+    Optionally filter to specific chunk_ids.
+    """
+    if chunk_ids:
+        rows = conn.execute("""
+            SELECT chunk_id, file_id, entity_id, chunk_index, region_type, chunk_type,
+                   section_path, linked_fact_ids, linked_periods, linked_metrics,
+                   contains_numerical_claim, numerical_claims, raw_text, chroma_document_id
+            FROM qualitative_chunks
+            WHERE entity_id = ? AND chunk_id = ANY(?)
+            ORDER BY chunk_index
+        """, [entity_id, chunk_ids]).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT chunk_id, file_id, entity_id, chunk_index, region_type, chunk_type,
+                   section_path, linked_fact_ids, linked_periods, linked_metrics,
+                   contains_numerical_claim, numerical_claims, raw_text, chroma_document_id
+            FROM qualitative_chunks
+            WHERE entity_id = ?
+            ORDER BY chunk_index
+        """, [entity_id]).fetchall()
+
+    columns = [
+        "chunk_id", "file_id", "entity_id", "chunk_index", "region_type", "chunk_type",
+        "section_path", "linked_fact_ids", "linked_periods", "linked_metrics",
+        "contains_numerical_claim", "numerical_claims", "raw_text", "chroma_document_id"
+    ]
+    return [dict(zip(columns, row)) for row in rows]

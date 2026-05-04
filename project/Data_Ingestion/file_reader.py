@@ -502,6 +502,61 @@ def write_to_staging(conn: duckdb.DuckDBPyConnection, facts: list[dict]) -> int:
     return len(facts)
 
 
+# ── Inline annotation extraction (Phase 2 bridge) ─────────────────────────────
+
+_ANN_COL_RE = re.compile(
+    r"^(note|annotation|remark|comment|footnote|addendum)\s*",
+    re.I,
+)
+
+
+def extract_inline_annotations(
+    df: pl.DataFrame,
+    file_id: int,
+    entity_id: int,
+) -> list[dict]:
+    """
+    Detect columns whose header matches note/annotation/remark/comment/footnote
+    and emit each cell as a separate qualitative chunk (no ChromaDB embedding —
+    text is too short for meaningful vectorisation).
+
+    Returns list of chunk dicts ready for INSERT into qualitative_chunks.
+    """
+    import json as _json
+    annotation_chunks: list[dict] = []
+
+    for col in df.columns:
+        if not _ANN_COL_RE.match(col):
+            continue
+        for row_idx, val in enumerate(df[col].to_list()):
+            text = str(val).strip()
+            if not text or text in ("N/A", "n/a", "-", ""):
+                continue
+            annotation_chunks.append({
+                "file_id": file_id,
+                "entity_id": entity_id,
+                "chunk_index": row_idx,
+                "region_type": "inline_annotation",
+                "chunk_type": "footnote",
+                "section_path": col,
+                "linked_fact_ids": "[]",
+                "linked_periods": "[]",
+                "linked_metrics": "[]",
+                "contains_numerical_claim": detect_numerical_claims(text)[0],
+                "numerical_claims": "[]",
+                "raw_text": text,
+                "chroma_document_id": None,
+            })
+
+    return annotation_chunks
+
+
+def _detect_numerical_claims_from_text(text: str) -> bool:
+    """Simple digit scan — used by extract_inline_annotations."""
+    import re as _re
+    return bool(_re.search(r"\d", text))
+
+
 # ── Top-level ingest function ─────────────────────────────────────────────────
 
 def ingest_file(
@@ -528,6 +583,36 @@ def ingest_file(
 
     n = write_to_staging(conn, facts)
     unmapped = _find_unmapped(df, layout)
+
+    # Phase 2 bridge: extract inline annotations from note/remark columns
+    try:
+        annotations = extract_inline_annotations(df, file_id, entity_id)
+        if annotations:
+            import json as _json
+            for ann in annotations:
+                has_num = _detect_numerical_claims_from_text(ann["raw_text"])
+                conn.execute("""
+                    INSERT INTO qualitative_chunks (
+                        chunk_id, file_id, entity_id, chunk_index, region_type,
+                        chunk_type, section_path, linked_fact_ids, linked_periods,
+                        linked_metrics, contains_numerical_claim, numerical_claims,
+                        raw_text, chroma_document_id
+                    ) VALUES (
+                        nextval('staging_id_seq'), ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?
+                    )
+                """, [
+                    ann["file_id"], ann["entity_id"], ann["chunk_index"],
+                    ann["region_type"], ann["chunk_type"],
+                    ann["section_path"], "[]", "[]", "[]",
+                    has_num, "[]",
+                    ann["raw_text"], None,
+                ])
+            conn.commit()
+    except Exception:
+        # qualitative_chunks table may not exist during standalone Phase 1 runs
+        pass
 
     return {
         "file_id": file_id,

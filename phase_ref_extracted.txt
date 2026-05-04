@@ -1,0 +1,209 @@
+Deterministic Financial AI Co-Pilot
+Phase-by-Phase Reference: Inputs & Outputs
+This report summarises what each of the five phases does, what it receives as input, and what it produces as output. The system processes financial documents (CSV, Excel, PDF, DOCX) through a local-first pipeline that keeps all raw data on-device, uses an enterprise LLM only as a conversational router, and guarantees that every number returned to the user is traceable to a specific source cell.
+  Phase 1 — Quantitative Pipeline (Structured DB)
+Phase 1 transforms a raw uploaded file into clean, unit-explicit, queryable facts in DuckDB. It is the load-bearing engineering work in the entire system — everything downstream depends on what Phase 1 produces. It runs eight stages in sequence, with a mandatory user acknowledgment gate before any fact becomes queryable.
+INPUT
+OUTPUT
+Raw uploaded file (CSV, XLSX, DOCX, PDF)
+File on local disk — no cloud transfer
+May contain: title rows, blank rows, mixed units, accounting parens, prose-embedded numbers, pre-calculated totals, footnotes, free-text notes
+live.fact_metrics — unit-explicit rows (value, unit, original_unit, conversion_applied)
+live.fact_metrics_derived — pre-computed KPIs (Gross Margin %, EBITDA Margin %, YoY Growth)
+dim_source — file hash, sheet, cell reference for every fact
+Citation envelopes — full lineage for every value
+Qualitative content routed to Phase 2
+Onboarding message delivered to the user in chat
+The eight stages
+Stage
+Name
+What it does
+Output
+Stage 1
+File registration
+Computes SHA-256 hash, records filename, upload time, size. Detects file type.
+dim_source row · stable file ID
+Stage 2
+Region enumeration
+Identifies logical blocks within the file (P&L table, balance sheet, notes, footer). Assigns a type to each region and raises structural flags (mixed-unit anomaly, prose-values, ledger layout, aggregate rows). Routes qualitative regions to Phase 2.
+Ordered region list · type tags · structural flags · routing decisions
+Stage 3
+Pre-normalization
+Strips title rows, blank rows, TOTAL rows, pre-calculated metrics blocks, footers. Converts accounting parens to negatives. Extracts numbers from prose cells. Handles mixed-unit rows using footnote instructions. Routes free-text annotation columns to Phase 2.
+Clean Polars DataFrame per region · metadata blob · notes routed to Phase 2
+Stage 4
+Unit & period detection
+Reads units disclaimer, sheet headers, and cell-embedded unit hints. Assigns unit (INR_absolute, INR_lakhs, INR_crore, USD_thousands) to each region. Parses period labels (Apr-23, FY 2023-24, Q1'22) into canonical period identifiers.
+Per-region {unit, period_grain, period_map, confidence} annotations
+Stage 5
+Schema mapping (LLM)
+The only LLM call in Phase 1. Receives headers and 5 sample rows. Proposes a mapping JSON: each source column → canonical_field, sign convention, is_derived flag, derivation formula, unit_override if needed. Cannot invent fields outside the approved schema vocabulary.
+Mapping JSON proposal · mapping_warnings · unmapped_columns list
+Stage 6
+Validation gate
+Deterministic checks: sum check (derived columns verified from sources), total reconciliation (data rows must sum to the stripped TOTAL row within tolerance), unit magnitude check (values must match declared unit's scale), cross-period sanity check (growth rates within -90% to +1000%). Failures trigger a targeted retry payload to Stage 5. Three retries maximum before a column is excluded.
+PASS with conflicts list OR FAIL → retry Stage 5 · validation_log entry per check
+Stage 7
+Onboarding message gen
+Generates the bot's first chat message. Deterministic content: every interpretation decision listed, conflict options A/B/C/D for each cross-source disagreement. LLM-generated content: the friendly natural-language framing. Facts written to staging.fact_metrics — not yet queryable. File enters AWAITING_CONFLICT_RESOLUTION or AWAITING_ACKNOWLEDGMENT state.
+Chat onboarding message · staging.fact_metrics written · file state updated
+Stage 8
+Promote to DuckDB LIVE
+Triggered by user acknowledgment in chat. Applies the user's conflict resolution choices. Promotes facts from staging to live.fact_metrics. Computes and stores derived KPIs. Writes citation envelopes for every fact. Transitions file state to LIVE. Writes qualitative content to ChromaDB with fact_id linkbacks.
+live.fact_metrics queryable · citation envelopes · derived KPIs · file state: LIVE
+Core guardrail: the LLM participates only in Stage 5 (schema mapping) and Stage 7 (onboarding message framing). All arithmetic — sums, conversions, validation checks, derived KPIs — is deterministic Python. The LLM never sees raw numeric values from the file.
+  Phase 2 — Qualitative Context Pipeline (Vector DB)
+Phase 2 runs in parallel with the later stages of Phase 1. It makes the why behind the numbers searchable. Numbers live in DuckDB (Phase 1). The explanations, footnotes, management commentary, and contextual annotations that explain those numbers live in ChromaDB after Phase 2 processes them.
+INPUT
+OUTPUT
+Qualitative regions routed from Phase 1 Stage 3 (footer notes, annotation columns, narrative blocks)
+Entire DOCX / PDF documents (CIMs, K-1s, investment memos) — after embedded tables are bifurcated to Phase 1
+Inline row annotations from quantitative files (e.g. 'diwali peak', 'monsoon dip')
+ChromaDB chunks — embedded narrative text with full metadata
+Hard annotation links: chunk → fact_id rows in live.fact_metrics (where the connection can be established)
+contains_numerical_claim flags on every chunk that mentions a number
+Section-path citations (document section + paragraph number + page for PDFs)
+The four stages
+Stage 2.1 — Layout-aware parsing
+PyMuPDF parses PDFs by block structure (bounding boxes, font size, font weight) to distinguish headings, body paragraphs, footnotes, captions, and sidebars. Python-docx reads DOCX paragraph styles (Heading 1, Normal, Footnote Text). The output is a structured document tree — not flat text — with typed sections and their relationships preserved. For DOCX/PDF inputs, a bifurcation step runs first: any embedded table matching a financial layout is extracted and routed to Phase 1 for quantitative ingestion. Only narrative text continues into Phase 2.
+Stage 2.2 — Chunking
+The document tree is split into chunks of 150–300 words. Paragraphs are never split. Section headings always travel with the first paragraph of their section. Long paragraphs are split at sentence boundaries; short consecutive paragraphs are merged to the ceiling. One-sentence overlap between adjacent chunks prevents retrieval failure at chunk boundaries. Non-bifurcated tables (risk factor tables, competitive comparisons, timelines) are chunked as a unit with a table type tag.
+Stage 2.3 — Annotation linking
+Each chunk is examined for links to specific DuckDB facts. Inline row annotations (notes column) carry the period already attached — the link is written directly. Footer notes with period mentions ('from Oct') are linked to all relevant period fact_ids. Footnotes mentioning specific line items ('disputed receivables') are linked to the corresponding canonical metric. Where a confident link cannot be established, the chunk is stored as general entity context without a fact_id reference.
+Stage 2.4 — Embedding and storage
+Each chunk is converted to a vector embedding and stored in ChromaDB with its full metadata envelope: entity_id, source_file, region_type, chunk_type, section_path, linked_fact_ids, linked_periods, linked_metrics, contains_numerical_claim, numerical_claims list, relevance confidence, and ingested_at timestamp. The contains_numerical_claim flag is mandatory — every chunk with a digit in it is flagged so the orchestrator knows to cross-check against DuckDB before using any number from a qualitative chunk.
+Core guardrail: numbers embedded in qualitative documents (CIM narratives, footnotes) are never used directly. The contains_numerical_claim flag triggers a mandatory fetch_metric cross-check at query time. If DuckDB has the same fact, DuckDB wins. If not, the number is reported with an explicit caveat: this figure comes from management narrative, not the financial model.
+  Phase 3 — Deterministic Tool Surface
+Phase 3 is the functional safety net between the LLM and the data. Six Python tools are the only authorised path from a user's question to a fact. The LLM cannot query DuckDB directly, cannot touch ChromaDB directly, and cannot perform arithmetic. Every number in every response passes through one of these tools.
+INPUT
+OUTPUT
+Tool call from the Phase 4 orchestrator — parameterised function call, never raw SQL
+Parameters: entity_id (resolved pre-flight), metric name, period, unit_out
+For search_context: natural language query string + optional period and metric filters
+Typed result objects with Decimal values (never float), citation envelopes, and confidence flags
+Raises typed exceptions on missing data — never returns null or a guess
+All arithmetic performed in Python with Decimal precision — never by the LLM
+The six tools
+Tool
+Purpose
+Returns
+fetch_metric(
+  entity_id, metric,
+  period, unit_out
+)
+Returns a single numerical fact from live.fact_metrics. Applies unit conversion deterministically from a fixed table. Raises MetricNotFound with a list of available periods rather than returning null.
+FetchMetricResult: value (Decimal), unit, citation envelope, conflict_marker, as_of timestamp, confidence
+calculate_variance(
+  entity_id, metric,
+  period_1, period_2,
+  unit_out
+)
+Calls fetch_metric twice and subtracts in Python. The LLM is structurally prevented from performing this arithmetic itself. Also calls search_context internally to attach qualitative context for the variance.
+VarianceResult: period_1_value, period_2_value, absolute_change, pct_change (None if base=0), citations for both periods, qualitative_context chunks
+calculate_ratio(
+  entity_id, numerator,
+  denominator, period,
+  unit_out
+)
+Covers gross margin %, EBITDA margin %, customer concentration, and any metric that is one number divided by another. Enforces unit compatibility before dividing — raises UnitMismatchError if numerator and denominator are in different units.
+RatioResult: numerator_value, denominator_value, ratio (Decimal), unit (% or ratio), formula string, citations
+search_context(
+  entity_id, query,
+  period_filter,
+  metric_filter
+)
+The only tool that touches ChromaDB. Embeds the query and runs a filtered similarity search restricted to the specified entity. Returns chunks with their annotation links and numerical claim flags. Never computes or synthesises — returns raw text and metadata only.
+SearchContextResult: list of QualitativeChunk (text, chunk_type, section_path, linked_fact_ids, contains_numerical_claim, numerical_claims, relevance_score)
+list_sources(
+  entity_id, metric,
+  period
+)
+Returns every source document carrying a fact for this entity/metric/period, with values, source ranks, and which source the user chose during onboarding. Used when the user asks where a number came from, or when a new upload might conflict with existing live facts.
+ListSourcesResult: list of SourceRecord (file, sheet, cell, value, unit, source_rank, is_chosen), conflict_detected flag, chosen_source_id
+list_available_metrics(
+  entity_id
+)
+Called at the start of every conversation turn. Returns the complete set of metrics queryable for this entity — canonical field names, available periods, confidence, and whether qualitative context exists. Prevents the LLM from hallucinating that a metric exists when it doesn't.
+ListAvailableMetricsResult: list of MetricAvailability (canonical_field, available_periods, unit, confidence, is_derived, has_qualitative_context, conflict_marker)
+Core guardrail: all six tools raise typed exceptions on missing or ambiguous data — never return null, zero, or an estimate. The orchestrator is required to surface the exception to the user rather than attempting a workaround.
+  Phase 4 — Agentic Orchestration
+Phase 4 is the LLM layer — but its role is tightly constrained. The LLM acts as a router and language formatter, not as an analyst. It interprets the user's intent, resolves the entity reference, selects the appropriate tools, and formats the tool outputs into a plain-English response. It never performs arithmetic, never queries the database directly, and never answers a question about data that has not reached LIVE state.
+INPUT
+OUTPUT
+User's natural language question
+File state per entity (UPLOADED / AWAITING_CONFLICT_RESOLUTION / AWAITING_ACKNOWLEDGMENT / LIVE)
+Tool outputs from Phase 3 (typed result objects, citation envelopes)
+Conversational history for the session
+Tool call sequence — parameterised calls to Phase 3 tools (never raw SQL)
+Plain-English response — numbers from tool outputs only, qualitative framing from ChromaDB chunks
+Conflict-aware response when list_sources detects multiple disagreeing sources
+Refusal message when: file not yet LIVE, metric not available, data absent
+What the orchestrator does on each turn
+1. Entity resolution pre-flight — 
+Before any tool call, the user's company reference is resolved to a stable entity_id via a deterministic lookup against dim_entity. Ambiguous names trigger a clarification question. The LLM never passes a raw company name to a tool — only a resolved entity_id.
+2. File state check — 
+The orchestrator checks the file state for the resolved entity. If the file is not LIVE, it redirects to the open gate — surfacing the unanswered conflict question or the acknowledgment prompt rather than attempting to answer.
+3. list_available_metrics — 
+Called unconditionally at the start of every turn. Establishes what can be answered before the user's specific question is interpreted. If the requested metric is not in the list, the orchestrator refuses rather than improvising.
+4. Tool selection and sequencing — 
+The orchestrator selects the minimum set of tools needed to answer the question. A simple lookup needs only fetch_metric. A variance question needs calculate_variance. A 'why' question needs search_context after the numeric tool. A 'where did this come from' question needs list_sources.
+5. Numerical claim check — 
+If search_context returns chunks with contains_numerical_claim: True, the orchestrator calls fetch_metric for each claimed number before using it in the response. DuckDB always wins over qualitative narrative.
+6. Conflict-aware response — 
+If list_sources returns conflict_detected: True, the response template mandates surfacing all sources with citations and noting which was chosen during onboarding — rather than silently reporting only the chosen value.
+7. Response composition — 
+The LLM formats the tool outputs into a plain-English response. Numbers come verbatim from tool results. The LLM supplies the connecting prose and qualitative interpretation only. The response includes inline citations for every numerical claim.
+Core guardrail: the system prompt prohibits free-form SQL, arithmetic, and guessing. Tools expose parameterised function signatures only — the LLM cannot emit a raw SQL string. The orchestrator enforces the file state machine: no answer is given for any entity whose file has not reached LIVE state.
+  Phase 5 — User Interface & Integration
+Phase 5 is the Streamlit chat application that the non-technical user sees. It is the surface where the entire pipeline becomes a conversation — file upload triggers Phase 1 and 2 in the background, the onboarding message arrives as the bot's first chat turn, and every subsequent question and answer flows through Phases 3 and 4.
+INPUT
+OUTPUT
+File drag-and-drop or upload button — triggers Phase 1 + 2 background processing
+User messages in the chat input — routed to Phase 4 orchestrator
+Conflict resolution answers during onboarding — written back to staging metadata
+Acknowledgment message ('ok', 'go ahead') — triggers Stage 8 promotion to LIVE
+Onboarding conversation message — every assumption disclosed, blocking questions for conflicts
+Answers with inline citations — every numerical claim linked to its source
+'Show your work' expander on every number — tool call, cited cell, unit conversion, formula
+File state indicators — clear UI signal of which files are LIVE vs still in onboarding
+Processing status feedback — 'still reading the file, give me a moment' during Phase 1
+Key UI requirements
+File state machine enforcement — 
+The chat input is gated by file state. Questions about a non-LIVE entity are intercepted and redirected to the onboarding gate. The user cannot bypass the conflict resolution step by phrasing a question cleverly.
+Onboarding message structure — 
+Rendered with clear sections: WHAT I FOUND / WHAT I ASSUMED / WHAT I DERIVED / WHAT I NEED FROM YOU. The blocking question section (conflicts) is never collapsible. The disclosure sections collapse into summary groups if they exceed ~30 items.
+Show your work expander — 
+Every numerical answer is expandable. The expansion shows: tool called, input parameters, source file, sheet, cell reference, original value, unit conversion applied, formula for derived metrics, and which onboarding choice was used if the fact was subject to a conflict.
+Friendly rendering of technical detail — 
+The expander content is rendered in plain language, not raw JSON. 'This came from cell B8 of the Other Exp Detail sheet, where the value 2,845,000 was in absolute Rupees — converted to ₹28.45 Lakhs to match the rest of the sheet.'
+Reset command — 
+A 'reset source choices' command returns a file to AWAITING_CONFLICT_RESOLUTION state, re-presents the conflict questions, and re-promotes with the new choices. Facts derived from the prior choices are removed from live tables until re-promotion.
+Multi-file session support — 
+Each uploaded file has its own independent state. A user can have one file LIVE and one file in AWAITING_CONFLICT_RESOLUTION simultaneously. Cross-file conflicts (same company, different source files) surface in the second file's onboarding.
+Core guardrail: the UI never renders a number that did not come through a Phase 3 tool. All display formatting — currency symbols, thousand separators, decimal places — is applied in the UI layer to the Decimal values returned by the tools, not to LLM-generated text.
+Quick reference — all phases
+Phase
+Role
+Primary input
+Primary output
+Phase 1
+Quantitative pipeline
+Raw file (CSV, XLSX, DOCX, PDF)
+Unit-explicit facts in live.fact_metrics · citation envelopes · derived KPIs
+Phase 2
+Qualitative pipeline
+Narrative regions from Phase 1 · DOCX/PDF documents after bifurcation
+ChromaDB chunks · annotation links to fact_ids · numerical claim flags
+Phase 3
+Deterministic tools
+Parameterised tool calls from Phase 4 orchestrator
+Typed result objects with Decimal values · citations · typed exceptions on missing data
+Phase 4
+LLM orchestration
+User question · file states · tool outputs · session history
+Tool call sequence · plain-English response · citations · refusals when data absent
+Phase 5
+Chat UI
+File uploads · user chat messages · onboarding answers
+Onboarding conversation · cited answers · show-your-work expanders · state indicators
+The key architectural property across all five phases: the LLM participates only in Stage 5 schema mapping (Phase 1), onboarding message framing (Phase 1), and response composition (Phase 4). All data retrieval, arithmetic, unit conversion, validation, and lineage tracking is deterministic Python. This is what makes the 100% mathematical accuracy on LIVE facts success metric achievable.

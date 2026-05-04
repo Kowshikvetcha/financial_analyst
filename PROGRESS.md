@@ -1,6 +1,6 @@
 # Project Progress — Deterministic Financial AI Co-Pilot
 
-> Last updated: 2026-05-03
+> Last updated: 2026-05-04
 > Reference: `docs/Financial_AI_Agent_PRD_v1.2.docx`, `docs/Phase_Reference_Report.docx`
 
 ---
@@ -70,7 +70,6 @@
 ### Known gaps
 
 - **Mixed units within a sheet** (e.g. Sharma Textiles "Other Exp Detail" — most rows in Lakhs, two rows in absolute Rs.) not detected.
-- **Phase 2 not started** — qualitative pipeline for DOCX/PDF handling
 
 ---
 
@@ -78,7 +77,22 @@
 
 **Goal:** Narrative text from PDFs/DOCXs → ChromaDB chunks linked back to DuckDB fact_ids.
 
-**Overall status: ❌ Not started**
+**Overall status: ✅ Complete**
+
+Implemented in this update:
+- `schema.py`: `qualitative_chunks` table + `register_qualitative_file()` + `get_qualitative_chunks()`
+- `embeddings.py`: lazy-loaded singleton `all-MiniLM-L6-v2` sentence-transformer wrapper
+- `qualitative.py`: extraction/chunking/claim detection/linking/ChromaDB persistence pipeline
+- `pipeline.py`: Phase 2 invocation + `--skip-qualitative` flag
+- `file_reader.py`: inline annotation extraction from notes/comment columns
+- `test_qualitative.py`: comprehensive unit test suite (22 tests)
+- ChromaDB storage path: `project/Data_Ingestion/chromadb_data/`
+- Verified end-to-end run on `ZenithOps_CIM_Project_Atlas.docx` (132 chunks stored) after Phase 1
+
+Verification status:
+- `pytest Data_Ingestion/test_qualitative.py -v`: **22 passed**
+- `python Data_Ingestion/pipeline.py --mock`: Phase 1 + Phase 2 completed successfully
+- ChromaDB duplicate-ID warning fixed by switching `collection.add(...)` to `collection.upsert(...)` in `store_in_chromadb()`.
 
 | Item | Status | Notes |
 |------|--------|-------|
