@@ -1,0 +1,4 @@
+{"ts": 1778007819, "tool": "cloud_plan", "args": {"entity_id": 1, "question": "what is revenue in FY24"}, "outcome": "fallback_local:planner unavailable"}
+{"ts": 1778007819, "tool": "fetch_metric", "args": {"entity_id": 1, "metric": "revenue_net", "period": "FY24"}, "outcome": "ok"}
+{"ts": 1778008759, "tool": "cloud_plan", "args": {"entity_id": 1, "question": "what is revenue in FY24"}, "outcome": "fallback_local:planner unavailable"}
+{"ts": 1778008759, "tool": "fetch_metric", "args": {"entity_id": 1, "metric": "revenue_net", "period": "FY24"}, "outcome": "ok"}

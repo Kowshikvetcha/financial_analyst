@@ -1,47 +1,40 @@
-"""
+﻿"""
 Polars-based ingestion engine for Phase 1.
 
-Handles the two most common financial file layouts:
-  1. WIDE (columnar periods):  rows = metrics, columns = time periods
-     e.g. Glow Naturals monthly P&L with Apr-23, May-23 … as column headers
-  2. TALL (row periods):       rows = time periods, columns = metrics
-     e.g. simple annual data with FY22, FY23, FY24 as row values
-  3. LEDGER (vertical-block):  Tally-style with debit/credit columns
-     e.g. accounting software exports with particulars + amounts
-
-The engine auto-detects layout, normalises headers, extracts raw facts,
-and writes them to staging_facts in DuckDB.
-
-Value parsing features:
-  - Handles accounting paren-negatives: (124.50) → -124.50
-  - Strips commas from numeric strings
-  - Ignores empty, N/A, and dash values
+Supports:
+  1. WIDE layout (rows=metrics, columns=periods)
+  2. TALL layout (rows=periods, columns=metrics)
+  3. LEDGER/TALLY style exports (detected heuristically)
 """
 
-import polars as pl
-import duckdb
+import re
 from pathlib import Path
 from typing import Optional
-import re
 
-from canonical_fields import resolve_alias, CANONICAL_FIELDS
-from units import detect_unit, normalise, UNKNOWN_UNIT
+import duckdb
+import polars as pl
+
+from canonical_fields import (
+    resolve_alias,
+    detect_ledger_format,
+    extract_ledger_facts,
+)
 from periods import parse_period
+from units import normalise
 
 
 def list_excel_sheets(file_path: Path) -> list[str]:
     """Return sheet names from an Excel file, or [''] for CSV."""
     suffix = file_path.suffix.lower()
-    if suffix in ('.xlsx', '.xls'):
+    if suffix in (".xlsx", ".xls"):
         import openpyxl
+
         wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
         sheets = list(wb.sheetnames)
         wb.close()
         return sheets
-    return ['']
+    return [""]
 
-
-# ── Preamble detection ────────────────────────────────────────────────────────
 
 _DISCLAIMER_RE = re.compile(
     r"all numbers|unless mentioned|figures in|amounts in|values in|"
@@ -50,22 +43,56 @@ _DISCLAIMER_RE = re.compile(
 )
 
 _SKIP_FILENAME_WORDS = {
-    "pnl", "pl", "balance", "sheet", "bs", "monthly", "annual", "quarterly",
-    "audited", "accounts", "mis", "management", "report", "financials",
-    "financial", "data", "fy", "fy22", "fy23", "fy24", "fy25", "fy26",
-    "cim", "deck", "model", "final", "v1", "v2", "v3", "revised", "draft",
-    "copy", "export", "tally", "summary", "detail", "detailed", "overview",
-    "income", "statement", "profit", "loss", "p&l",
+    "pnl",
+    "pl",
+    "balance",
+    "sheet",
+    "bs",
+    "monthly",
+    "annual",
+    "quarterly",
+    "audited",
+    "accounts",
+    "mis",
+    "management",
+    "report",
+    "financials",
+    "financial",
+    "data",
+    "fy",
+    "fy22",
+    "fy23",
+    "fy24",
+    "fy25",
+    "fy26",
+    "cim",
+    "deck",
+    "model",
+    "final",
+    "v1",
+    "v2",
+    "v3",
+    "revised",
+    "draft",
+    "copy",
+    "export",
+    "tally",
+    "summary",
+    "detail",
+    "detailed",
+    "overview",
+    "income",
+    "statement",
+    "profit",
+    "loss",
+    "p&l",
 }
 
 
 def _find_data_start(file_path: Path, sheet_name: Optional[str] = None) -> tuple[int, list[str]]:
     """
-    Scan up to the first 30 rows to find where the actual data table header is.
-    Returns (skip_rows, preamble_texts) where preamble_texts are the single-cell
-    lines above the header (title, disclaimer, etc.).
-
-    Strategy: the header row has the most non-empty cells in the file.
+    Scan first rows to find the effective header row and preamble lines.
+    Strategy: pick the first row close to max non-empty cells.
     """
     import csv as _csv
 
@@ -78,18 +105,16 @@ def _find_data_start(file_path: Path, sheet_name: Optional[str] = None) -> tuple
             for _, row in zip(range(30), reader):
                 rows.append([str(v).strip() for v in row])
     else:
-        # Excel: read raw without skipping to inspect preamble
-        # Use sheet name string if provided, else default to first sheet by name
         if sheet_name:
             _sheet: str | int = sheet_name
         else:
             import openpyxl as _openpyxl
+
             _wb = _openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
             _sheet = _wb.sheetnames[0]
             _wb.close()
-        # has_header=False so rows[0] == file row 0, making header_idx a true file row index
-        raw = pl.read_excel(file_path, sheet_name=_sheet, infer_schema_length=0,
-                            has_header=False)
+
+        raw = pl.read_excel(file_path, sheet_name=_sheet, infer_schema_length=0, has_header=False)
         for row in raw.head(30).iter_rows():
             rows.append([str(v).strip() if v is not None else "" for v in row])
 
@@ -101,11 +126,7 @@ def _find_data_start(file_path: Path, sheet_name: Optional[str] = None) -> tuple
     if max_count == 0:
         return 0, []
 
-    # First row that reaches (or is close to) the maximum non-empty cell count
-    header_idx = next(
-        (i for i, c in enumerate(counts) if c >= max(2, max_count - 1)),
-        0,
-    )
+    header_idx = next((i for i, c in enumerate(counts) if c >= max(2, max_count - 1)), 0)
 
     preamble: list[str] = []
     for i in range(header_idx):
@@ -116,12 +137,11 @@ def _find_data_start(file_path: Path, sheet_name: Optional[str] = None) -> tuple
     return header_idx, preamble
 
 
-# ── Entity name detection ─────────────────────────────────────────────────────
-
 def _entity_name_from_filename(file_path: Path) -> str:
     words = re.split(r"[_\-\s]+", file_path.stem)
     kept = [
-        w.title() for w in words
+        w.title()
+        for w in words
         if not re.match(r"^\d{2,4}$", w) and w.lower() not in _SKIP_FILENAME_WORDS
     ]
     return " ".join(kept) if kept else file_path.stem.replace("_", " ").title()
@@ -131,14 +151,12 @@ def _entity_name_from_preamble(preamble: list[str]) -> Optional[str]:
     for line in preamble:
         if _DISCLAIMER_RE.search(line):
             continue
-        # Strip content in parentheses (unit hints, date ranges)
         name = re.sub(r"\(.*?\)", "", line).strip()
-        # Take only the part before a separator like " - ", " | ", ":"
         name = re.split(r"\s*[-|:]\s*", name)[0].strip()
-        # Remove skip words and bare year tokens
         words = re.split(r"[\s_]+", name)
         kept = [
-            w for w in words
+            w
+            for w in words
             if w and not re.match(r"^\d{2,4}$", w) and w.lower() not in _SKIP_FILENAME_WORDS
         ]
         result = " ".join(kept)
@@ -147,12 +165,7 @@ def _entity_name_from_preamble(preamble: list[str]) -> Optional[str]:
     return None
 
 
-def detect_entity_name(file_path: Path, df: pl.DataFrame,
-                       preamble: Optional[list[str]] = None) -> str:
-    """
-    Best-effort entity name: preamble title rows → filename fallback.
-    Pass preamble from _read_file to avoid re-reading the file.
-    """
+def detect_entity_name(file_path: Path, df: pl.DataFrame, preamble: Optional[list[str]] = None) -> str:
     if preamble:
         from_preamble = _entity_name_from_preamble(preamble)
         if from_preamble:
@@ -160,14 +173,12 @@ def detect_entity_name(file_path: Path, df: pl.DataFrame,
     return _entity_name_from_filename(file_path)
 
 
-# ── Layout detection ──────────────────────────────────────────────────────────
-
 PERIOD_PATTERN = re.compile(
     r"(FY\s*\d{2,4}|Q[1-4]\s*FY\s*\d{2,4}|FY\s*\d{2,4}[\-_]Q[1-4]"
     r"|FY\s*\d{2,4}[\-_]M\d{1,2}"
     r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s\-]\d{2,4}"
     r"|\d{4})",
-    re.I
+    re.I,
 )
 
 
@@ -176,33 +187,20 @@ def _looks_like_period(val: str) -> bool:
 
 
 def detect_layout(df: pl.DataFrame) -> str:
-    """
-    Returns 'wide' or 'tall'.
-    Wide:  column headers contain period strings → metrics are in rows.
-    Tall:  first column contains period strings → metrics are in columns.
-    """
-    # Check column headers
     period_cols = sum(1 for c in df.columns if _looks_like_period(c))
     if period_cols >= 2:
         return "wide"
 
-    # Check first column values
     first_col = df.columns[0]
     sample = df[first_col].drop_nulls().head(10).cast(pl.Utf8).to_list()
     period_rows = sum(1 for v in sample if _looks_like_period(v))
     if period_rows >= 2:
         return "tall"
 
-    return "wide"  # default
+    return "wide"
 
-
-# ── File readers ──────────────────────────────────────────────────────────────
 
 def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.DataFrame, str, list[str], int]:
-    """
-    Read Excel or CSV, skipping any preamble rows above the data table.
-    Returns (DataFrame, detected_unit_string, preamble_lines, skip_rows).
-    """
     suffix = file_path.suffix.lower()
     skip_rows, preamble = _find_data_start(file_path, sheet_name)
 
@@ -211,22 +209,17 @@ def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.Da
             _sheet: str | int = sheet_name
         else:
             import openpyxl as _openpyxl
+
             _wb = _openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
             _sheet = _wb.sheetnames[0]
             _wb.close()
-        # calamine (fastexcel) skip_rows in read_options skips empty rows only, not
-        # arbitrary rows. Read all rows with has_header=False and slice manually.
-        df_raw = pl.read_excel(
-            file_path, sheet_name=_sheet,
-            infer_schema_length=0, has_header=False,
-        )
+
+        df_raw = pl.read_excel(file_path, sheet_name=_sheet, infer_schema_length=0, has_header=False)
         if len(df_raw) > skip_rows:
-            # Row at skip_rows is the header row
             header_vals = [
                 str(v) if v is not None and str(v) not in ("None", "") else ""
                 for v in df_raw.row(skip_rows)
             ]
-            # Make column names unique
             seen: dict[str, int] = {}
             unique_headers: list[str] = []
             for h in header_vals:
@@ -238,16 +231,11 @@ def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.Da
                 else:
                     seen[h] = 0
                     unique_headers.append(h)
-            df = df_raw.slice(skip_rows + 1).rename(
-                {old: new for old, new in zip(df_raw.columns, unique_headers)}
-            )
+            df = df_raw.slice(skip_rows + 1).rename({old: new for old, new in zip(df_raw.columns, unique_headers)})
         else:
             df = df_raw
     elif suffix == ".csv":
-        df = pl.read_csv(
-            file_path, infer_schema_length=0,
-            truncate_ragged_lines=True, skip_rows=skip_rows,
-        )
+        df = pl.read_csv(file_path, infer_schema_length=0, truncate_ragged_lines=True, skip_rows=skip_rows)
     else:
         raise ValueError(f"Unsupported file type: {suffix}")
 
@@ -256,13 +244,20 @@ def _read_file(file_path: Path, sheet_name: Optional[str] = None) -> tuple[pl.Da
 
 
 def _sniff_unit(df: pl.DataFrame, preamble: Optional[list[str]] = None) -> str:
-    """
-    Look for unit hints in preamble lines, column headers, and first few rows.
-    Returns a raw unit string for detect_unit() to parse.
-    Prefers explicit scale words (crore, lakh, million) over bare currency names.
-    """
-    unit_hints = ["crore", "lakh", "lacs", "lakhs", "cr.", "rs.", "inr", "usd",
-                  "thousand", "000", "million", "rupee"]
+    unit_hints = [
+        "crore",
+        "lakh",
+        "lacs",
+        "lakhs",
+        "cr.",
+        "rs.",
+        "inr",
+        "usd",
+        "thousand",
+        "000",
+        "million",
+        "rupee",
+    ]
     scale_hints = ["crore", "lakh", "lacs", "lakhs", "cr.", "thousand", "000", "million"]
 
     candidates: list[str] = list(preamble or []) + list(df.columns)
@@ -270,12 +265,10 @@ def _sniff_unit(df: pl.DataFrame, preamble: Optional[list[str]] = None) -> str:
         col0 = df.columns[0]
         candidates.extend(df[col0].head(3).cast(pl.Utf8).to_list())
 
-    # Prefer candidates that contain a scale word
     for candidate in candidates:
         s = str(candidate).lower()
         if any(h in s for h in scale_hints):
             return str(candidate)
-    # Fall back to bare currency hint
     for candidate in candidates:
         s = str(candidate).lower()
         if any(h in s for h in unit_hints):
@@ -283,16 +276,7 @@ def _sniff_unit(df: pl.DataFrame, preamble: Optional[list[str]] = None) -> str:
     return ""
 
 
-# ── Value parsing helpers ──────────────────────────────────────────────────
-
 def _parse_numeric_value(raw_val) -> Optional[float]:
-    """
-    Parse a raw cell value into a numeric float.
-    Handles:
-      - Accounting paren-negatives: (124.50) → -124.50
-      - Comma-separated numbers: 1,234.50 → 1234.50
-      - Empty strings, dashes, N/A → None
-    """
     if raw_val is None:
         return None
 
@@ -300,12 +284,10 @@ def _parse_numeric_value(raw_val) -> Optional[float]:
     if not val_str or val_str in ("", "-", "—", "N/A", "na", "n/a"):
         return None
 
-    # Handle accounting paren-negatives: (124.50) → -124.50
-    if val_str.startswith('(') and val_str.endswith(')'):
-        val_str = '-' + val_str[1:-1]
+    if val_str.startswith("(") and val_str.endswith(")"):
+        val_str = "-" + val_str[1:-1]
 
-    # Remove commas
-    val_str = val_str.replace(',', '').strip()
+    val_str = val_str.replace(",", "").strip()
 
     try:
         return float(val_str)
@@ -313,31 +295,59 @@ def _parse_numeric_value(raw_val) -> Optional[float]:
         return None
 
 
-_ROW_UNIT_RE = re.compile(r"\b(rs\.?|inr|usd)?\s*(crore|crores|cr\.?|lakh|lakhs|lacs|million|mn|thousand|000)\b", re.I)
+_ROW_UNIT_RE = re.compile(
+    r"\b(rs\.?|inr|usd)?\s*(crore|crores|cr\.?|lakh|lakhs|lacs|million|mn|thousand|000)\b",
+    re.I,
+)
+_ABS_HINT_RE = re.compile(r"\b(rs\.?|inr|usd)\s*(absolute|actual|exact|value|amount)\b", re.I)
 
 
-def _row_level_unit_override(label: str) -> Optional[str]:
-    m = _ROW_UNIT_RE.search(label or "")
-    if not m:
-        return None
-    token = m.group(0).lower()
-    if "usd" in token:
-        return f"USD {token}"
-    return f"INR {token}"
+def _row_level_unit_override(label: str, fallback_unit: str = "") -> Optional[str]:
+    label = label or ""
+    ll = label.lower()
+
+    if _ABS_HINT_RE.search(label):
+        if "usd" in ll:
+            return "USD absolute"
+        return "INR absolute"
+
+    # Handle parenthetical unit hints in row names: e.g. "Packaging (Rs absolute)"
+    paren = re.search(r"\(([^)]*)\)", label)
+    if paren:
+        inner = paren.group(1)
+        m_inner = _ROW_UNIT_RE.search(inner)
+        if m_inner:
+            token = m_inner.group(0).lower()
+            if "usd" in token:
+                return f"USD {token}"
+            return f"INR {token}"
+
+    m = _ROW_UNIT_RE.search(label)
+    if m:
+        token = m.group(0).lower()
+        if "usd" in token:
+            return f"USD {token}"
+        return f"INR {token}"
+
+    # Heuristic for mixed-unit sheets: if fallback is lakh/crore and row label explicitly says rupees,
+    # treat it as absolute.
+    if "rupee" in ll or re.search(r"\brs\b", ll):
+        if any(x in (fallback_unit or "").lower() for x in ["lakh", "lac", "crore", "mn", "million"]):
+            if "usd" in (fallback_unit or "").lower():
+                return "USD absolute"
+            return "INR absolute"
+
+    return None
 
 
 def _get_cell_reference(col_idx: int, row_idx: int) -> str:
-    """Convert 1-based indices to Excel-style cell reference (e.g., B5)."""
-    # Excel column names: A, B, ..., Z, AA, AB, ...
-    col_letter = ''
-    col_num = col_idx  # already 1-based
+    col_letter = ""
+    col_num = col_idx
     while col_num > 0:
         col_num, remainder = divmod(col_num - 1, 26)
         col_letter = chr(65 + remainder) + col_letter
-    return f"{col_letter}{row_idx}"  # row_idx already 1-based
+    return f"{col_letter}{row_idx}"
 
-
-# ── Wide layout extractor ─────────────────────────────────────────────────────
 
 def extract_wide(
     df: pl.DataFrame,
@@ -347,38 +357,28 @@ def extract_wide(
     skip_rows: int = 0,
     source_sheet: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Extract facts from a wide-format dataframe.
-    Assumes: col 0 = metric labels, remaining cols = period values.
-    Returns list of raw fact dicts for staging with cell references.
-    """
     facts = []
     metric_col = df.columns[0]
     period_cols = [c for c in df.columns[1:] if _looks_like_period(c)]
 
     if not period_cols:
-        # Fall back: treat all non-first columns as potential periods
         period_cols = df.columns[1:]
-
-    unit_spec = detect_unit(unit_spec_str)
 
     for row_idx, row in enumerate(df.iter_rows(named=True)):
         raw_label = str(row.get(metric_col, "") or "").strip()
         if not raw_label:
             continue
 
-        # Skip section separator rows like "--- FY 2021-22 ---"
-        if raw_label.startswith('---'):
+        if raw_label.startswith("---"):
             continue
-        # Skip bare aggregate rows (e.g. a row labelled just "TOTAL" or "Grand Total")
-        # but only if they don't resolve to a known canonical field
-        if re.match(r'^\s*(total|grand total|subtotal|sub[\s\-]total)\s*$', raw_label, re.I):
+
+        if re.match(r"^\s*(total|grand total|subtotal|sub[\s\-]total)\s*$", raw_label, re.I):
             if not resolve_alias(raw_label):
                 continue
 
         canonical = resolve_alias(raw_label)
         if not canonical:
-            continue  # unmapped metric — skip (logged separately)
+            continue
 
         for col_idx, period_col in enumerate(period_cols):
             period_spec = parse_period(str(period_col))
@@ -390,34 +390,32 @@ def extract_wide(
             if numeric_val is None:
                 continue
 
-            row_unit = _row_level_unit_override(raw_label)
+            row_unit = _row_level_unit_override(raw_label, fallback_unit=unit_spec_str)
             effective_unit = row_unit if row_unit else unit_spec_str
             nv = normalise(numeric_val, effective_unit)
-            # Cell ref: period col (1-based frame index) + skip_rows offset
-            # col_idx starts at 0 for period_cols[0] at df.columns[1] = B
             cell_ref = _get_cell_reference(col_idx + 2, row_idx + 1 + skip_rows)
 
-            facts.append({
-                "file_id": file_id,
-                "entity_id": entity_id,
-                "canonical_field": canonical,
-                "period": period_spec.canonical,
-                "value_normalised": nv.value_normalised,
-                "currency": nv.currency,
-                "original_unit": nv.original_unit,
-                "conversion_factor": nv.conversion_factor,
-                "conversion_applied": nv.conversion_applied,
-                "raw_value": numeric_val,
-                "raw_header": raw_label,
-                "row_context": raw_label,
-                "cell_reference": cell_ref,
-                "source_sheet": source_sheet,
-            })
+            facts.append(
+                {
+                    "file_id": file_id,
+                    "entity_id": entity_id,
+                    "canonical_field": canonical,
+                    "period": period_spec.canonical,
+                    "value_normalised": nv.value_normalised,
+                    "currency": nv.currency,
+                    "original_unit": nv.original_unit,
+                    "conversion_factor": nv.conversion_factor,
+                    "conversion_applied": nv.conversion_applied,
+                    "raw_value": numeric_val,
+                    "raw_header": raw_label,
+                    "row_context": raw_label,
+                    "cell_reference": cell_ref,
+                    "source_sheet": source_sheet,
+                }
+            )
 
     return facts
 
-
-# ── Tall layout extractor ─────────────────────────────────────────────────────
 
 def extract_tall(
     df: pl.DataFrame,
@@ -427,19 +425,13 @@ def extract_tall(
     skip_rows: int = 0,
     source_sheet: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Extract facts from a tall-format dataframe.
-    Assumes: col 0 = period labels, remaining cols = metric values.
-    """
     facts = []
     period_col = df.columns[0]
     metric_cols = df.columns[1:]
-    unit_spec = detect_unit(unit_spec_str)
 
     for row_idx, row in enumerate(df.iter_rows(named=True)):
         raw_period = str(row.get(period_col, "") or "").strip()
-        # Skip section separator rows
-        if str(raw_period).startswith('---'):
+        if raw_period.startswith("---"):
             continue
         period_spec = parse_period(raw_period)
         if not period_spec:
@@ -455,37 +447,33 @@ def extract_tall(
             if numeric_val is None:
                 continue
 
-            nv = normalise(numeric_val, unit_spec_str)
-            # Cell ref: metric columns start at df.columns[1] = B
-            # col_idx from enumerate starts at 1 for df.columns[1], so +1 gives correct column
+            row_unit = _row_level_unit_override(metric_col, fallback_unit=unit_spec_str)
+            effective_unit = row_unit if row_unit else unit_spec_str
+            nv = normalise(numeric_val, effective_unit)
             cell_ref = _get_cell_reference(col_idx + 1, row_idx + 1 + skip_rows)
-            facts.append({
-                "file_id": file_id,
-                "entity_id": entity_id,
-                "canonical_field": canonical,
-                "period": period_spec.canonical,
-                "value_normalised": nv.value_normalised,
-                "currency": nv.currency,
-                "original_unit": nv.original_unit,
-                "conversion_factor": nv.conversion_factor,
-                "conversion_applied": nv.conversion_applied,
-                "raw_value": numeric_val,
-                "raw_header": metric_col,
-                "row_context": raw_period,
-                "cell_reference": cell_ref,
-                "source_sheet": source_sheet,
-            })
+            facts.append(
+                {
+                    "file_id": file_id,
+                    "entity_id": entity_id,
+                    "canonical_field": canonical,
+                    "period": period_spec.canonical,
+                    "value_normalised": nv.value_normalised,
+                    "currency": nv.currency,
+                    "original_unit": nv.original_unit,
+                    "conversion_factor": nv.conversion_factor,
+                    "conversion_applied": nv.conversion_applied,
+                    "raw_value": numeric_val,
+                    "raw_header": metric_col,
+                    "row_context": raw_period,
+                    "cell_reference": cell_ref,
+                    "source_sheet": source_sheet,
+                }
+            )
 
     return facts
 
 
-# ── Staging writer ────────────────────────────────────────────────────────────
-
 def write_to_staging(conn: duckdb.DuckDBPyConnection, facts: list[dict]) -> int:
-    """
-    Bulk insert facts into staging_facts. Returns count inserted.
-    Uses a sequence for staging_id.
-    """
     if not facts:
         return 0
 
@@ -494,7 +482,8 @@ def write_to_staging(conn: duckdb.DuckDBPyConnection, facts: list[dict]) -> int:
     """)
 
     for f in facts:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO staging_facts (
                 staging_id, file_id, entity_id, canonical_field, period,
                 value_normalised, currency, original_unit, conversion_factor,
@@ -506,38 +495,37 @@ def write_to_staging(conn: duckdb.DuckDBPyConnection, facts: list[dict]) -> int:
                 ?, ?, ?, ?,
                 ?, ?
             )
-        """, [
-            f["file_id"], f["entity_id"], f["canonical_field"], f["period"],
-            f["value_normalised"], f["currency"], f["original_unit"], f["conversion_factor"],
-            f["conversion_applied"], f["raw_value"], f["raw_header"], f["row_context"],
-            f.get("cell_reference"), f.get("source_sheet"),
-        ])
+            """,
+            [
+                f["file_id"],
+                f["entity_id"],
+                f["canonical_field"],
+                f["period"],
+                f["value_normalised"],
+                f["currency"],
+                f["original_unit"],
+                f["conversion_factor"],
+                f["conversion_applied"],
+                f["raw_value"],
+                f["raw_header"],
+                f["row_context"],
+                f.get("cell_reference"),
+                f.get("source_sheet"),
+            ],
+        )
 
     conn.commit()
     return len(facts)
 
 
-# ── Inline annotation extraction (Phase 2 bridge) ─────────────────────────────
-
-_ANN_COL_RE = re.compile(
-    r"^(note|annotation|remark|comment|footnote|addendum)\s*",
-    re.I,
-)
+_ANN_COL_RE = re.compile(r"^(note|annotation|remark|comment|footnote|addendum)\s*", re.I)
 
 
-def extract_inline_annotations(
-    df: pl.DataFrame,
-    file_id: int,
-    entity_id: int,
-) -> list[dict]:
-    """
-    Detect columns whose header matches note/annotation/remark/comment/footnote
-    and emit each cell as a separate qualitative chunk (no ChromaDB embedding —
-    text is too short for meaningful vectorisation).
+def _detect_numerical_claims_from_text(text: str) -> bool:
+    return bool(re.search(r"\d", text))
 
-    Returns list of chunk dicts ready for INSERT into qualitative_chunks.
-    """
-    import json as _json
+
+def extract_inline_annotations(df: pl.DataFrame, file_id: int, entity_id: int) -> list[dict]:
     annotation_chunks: list[dict] = []
 
     for col in df.columns:
@@ -547,32 +535,26 @@ def extract_inline_annotations(
             text = str(val).strip()
             if not text or text in ("N/A", "n/a", "-", ""):
                 continue
-            annotation_chunks.append({
-                "file_id": file_id,
-                "entity_id": entity_id,
-                "chunk_index": row_idx,
-                "region_type": "inline_annotation",
-                "chunk_type": "footnote",
-                "section_path": col,
-                "linked_fact_ids": "[]",
-                "linked_periods": "[]",
-                "linked_metrics": "[]",
-                "contains_numerical_claim": detect_numerical_claims(text)[0],
-                "numerical_claims": "[]",
-                "raw_text": text,
-                "chroma_document_id": None,
-            })
+            annotation_chunks.append(
+                {
+                    "file_id": file_id,
+                    "entity_id": entity_id,
+                    "chunk_index": row_idx,
+                    "region_type": "inline_annotation",
+                    "chunk_type": "footnote",
+                    "section_path": col,
+                    "linked_fact_ids": "[]",
+                    "linked_periods": "[]",
+                    "linked_metrics": "[]",
+                    "contains_numerical_claim": _detect_numerical_claims_from_text(text),
+                    "numerical_claims": "[]",
+                    "raw_text": text,
+                    "chroma_document_id": None,
+                }
+            )
 
     return annotation_chunks
 
-
-def _detect_numerical_claims_from_text(text: str) -> bool:
-    """Simple digit scan — used by extract_inline_annotations."""
-    import re as _re
-    return bool(_re.search(r"\d", text))
-
-
-# ── Top-level ingest function ─────────────────────────────────────────────────
 
 def ingest_file(
     conn: duckdb.DuckDBPyConnection,
@@ -582,31 +564,37 @@ def ingest_file(
     confirmed_unit: Optional[str] = None,
     sheet_name: Optional[str] = None,
 ) -> dict:
-    """
-    Full ingestion pipeline for one file.
-    confirmed_unit overrides auto-detected unit; omit to rely on auto-detection.
-    """
+    """Full ingestion pipeline for one file/sheet."""
     df, detected_unit, preamble, skip_rows = _read_file(file_path, sheet_name)
     unit_str = confirmed_unit if confirmed_unit else detected_unit
     layout = detect_layout(df)
+
+    # Detect and route ledger/tally style sheets.
+    if detect_ledger_format(df, list(df.columns)):
+        layout = "ledger"
+
     entity_name = detect_entity_name(file_path, df, preamble)
 
     if layout == "wide":
         facts = extract_wide(df, file_id, entity_id, unit_str, skip_rows=skip_rows, source_sheet=sheet_name)
-    else:
+    elif layout == "tall":
         facts = extract_tall(df, file_id, entity_id, unit_str, skip_rows=skip_rows, source_sheet=sheet_name)
+    else:
+        facts = extract_ledger_facts(df, file_id, entity_id, unit_str)
+        for idx, fact in enumerate(facts, start=1):
+            fact.setdefault("cell_reference", _get_cell_reference(2, idx + skip_rows))
+            fact.setdefault("source_sheet", sheet_name)
 
     n = write_to_staging(conn, facts)
     unmapped = _find_unmapped(df, layout)
 
-    # Phase 2 bridge: extract inline annotations from note/remark columns
+    # Phase 2 bridge: inline annotation columns to qualitative_chunks.
     try:
         annotations = extract_inline_annotations(df, file_id, entity_id)
         if annotations:
-            import json as _json
             for ann in annotations:
-                has_num = _detect_numerical_claims_from_text(ann["raw_text"])
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO qualitative_chunks (
                         chunk_id, file_id, entity_id, chunk_index, region_type,
                         chunk_type, section_path, linked_fact_ids, linked_periods,
@@ -617,16 +605,26 @@ def ingest_file(
                         ?, ?, ?, ?,
                         ?, ?, ?, ?, ?
                     )
-                """, [
-                    ann["file_id"], ann["entity_id"], ann["chunk_index"],
-                    ann["region_type"], ann["chunk_type"],
-                    ann["section_path"], "[]", "[]", "[]",
-                    has_num, "[]",
-                    ann["raw_text"], None,
-                ])
+                    """,
+                    [
+                        ann["file_id"],
+                        ann["entity_id"],
+                        ann["chunk_index"],
+                        ann["region_type"],
+                        ann["chunk_type"],
+                        ann["section_path"],
+                        "[]",
+                        "[]",
+                        "[]",
+                        ann["contains_numerical_claim"],
+                        "[]",
+                        ann["raw_text"],
+                        None,
+                    ],
+                )
             conn.commit()
     except Exception:
-        # qualitative_chunks table may not exist during standalone Phase 1 runs
+        # qualitative_chunks may not exist in some standalone contexts.
         pass
 
     return {
@@ -642,11 +640,10 @@ def ingest_file(
 
 
 def _find_unmapped(df: pl.DataFrame, layout: str) -> list[str]:
-    """Return list of headers that couldn't be mapped to canonical fields."""
-    if layout == "wide":
+    if layout in ("wide", "ledger"):
         metric_col = df.columns[0]
         labels = df[metric_col].drop_nulls().cast(pl.Utf8).to_list()
         return [l for l in labels if l and not resolve_alias(l)]
-    else:
-        metric_cols = df.columns[1:]
-        return [c for c in metric_cols if not resolve_alias(c) and not _looks_like_period(c)]
+
+    metric_cols = df.columns[1:]
+    return [c for c in metric_cols if not resolve_alias(c) and not _looks_like_period(c)]

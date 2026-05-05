@@ -1,16 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, getcontext
+from decimal import Decimal, InvalidOperation, getcontext
 from typing import Optional
 import json
 
 import duckdb
-from qualitative import _get_chroma_client
 
+from qualitative import _get_chroma_client
 from units import format_for_display
 from schema import get_qualitative_chunks
-
 
 getcontext().prec = 28
 
@@ -47,12 +46,20 @@ class CitationEnvelope:
     fact_id: str
 
 
+def _to_decimal(value) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ToolError(f"invalid numeric value: {value}")
+
+
 def _resolve_entity_id(conn: duckdb.DuckDBPyConnection, entity: str | int) -> int:
     if isinstance(entity, int):
         row = conn.execute("SELECT entity_id FROM entities WHERE entity_id = ?", [entity]).fetchone()
         if not row:
             raise EntityNotFound(f"entity_id={entity} not found")
         return entity
+
     q = entity.strip().lower()
     rows = conn.execute(
         "SELECT entity_id FROM entities WHERE lower(entity_name) LIKE ? OR entity_slug LIKE ?",
@@ -70,7 +77,26 @@ def _citation_from_row(row) -> CitationEnvelope:
     return CitationEnvelope(source_file_id=row[6], source_sheet=row[7], cell_reference=row[8], fact_id=row[0])
 
 
-def fetch_metric(conn: duckdb.DuckDBPyConnection, entity_id: str | int, metric: str, period: str, unit_out: Optional[str] = None) -> dict:
+def _list_valid_periods(conn: duckdb.DuckDBPyConnection, entity_id: int, metric: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT period
+        FROM live_facts
+        WHERE entity_id = ? AND canonical_field = ?
+        ORDER BY period
+        """,
+        [entity_id, metric],
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def fetch_metric(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: str | int,
+    metric: str,
+    period: str,
+    unit_out: Optional[str] = None,
+) -> dict:
     eid = _resolve_entity_id(conn, entity_id)
     row = conn.execute(
         """
@@ -82,8 +108,14 @@ def fetch_metric(conn: duckdb.DuckDBPyConnection, entity_id: str | int, metric: 
         [eid, metric, period],
     ).fetchone()
     if not row:
-        raise MetricNotFound(f"metric='{metric}' period='{period}' not found for entity_id={eid}")
-    value_decimal = Decimal(str(row[3]))
+        valid_periods = _list_valid_periods(conn, eid, metric)
+        if valid_periods:
+            raise PeriodNotFound(
+                f"period='{period}' not found for metric='{metric}'. available={valid_periods}"
+            )
+        raise MetricNotFound(f"metric='{metric}' not found for entity_id={eid}")
+
+    value_decimal = _to_decimal(row[3])
     out = {
         "entity_id": eid,
         "metric": row[1],
@@ -96,11 +128,18 @@ def fetch_metric(conn: duckdb.DuckDBPyConnection, entity_id: str | int, metric: 
     return out
 
 
-def calculate_variance(conn: duckdb.DuckDBPyConnection, entity_id: str | int, metric: str, period_1: str, period_2: str, unit_out: Optional[str] = None) -> dict:
+def calculate_variance(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: str | int,
+    metric: str,
+    period_1: str,
+    period_2: str,
+    unit_out: Optional[str] = None,
+) -> dict:
     a = fetch_metric(conn, entity_id, metric, period_1, unit_out=None)
     b = fetch_metric(conn, entity_id, metric, period_2, unit_out=None)
-    va = Decimal(a["value"])
-    vb = Decimal(b["value"])
+    va = _to_decimal(a["value"])
+    vb = _to_decimal(b["value"])
     delta = vb - va
     pct = None if va == 0 else (delta / va) * Decimal("100")
     return {
@@ -117,11 +156,18 @@ def calculate_variance(conn: duckdb.DuckDBPyConnection, entity_id: str | int, me
     }
 
 
-def calculate_ratio(conn: duckdb.DuckDBPyConnection, entity_id: str | int, numerator: str, denominator: str, period: str, unit_out: Optional[str] = None) -> dict:
+def calculate_ratio(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: str | int,
+    numerator: str,
+    denominator: str,
+    period: str,
+    unit_out: Optional[str] = None,
+) -> dict:
     n = fetch_metric(conn, entity_id, numerator, period)
     d = fetch_metric(conn, entity_id, denominator, period)
-    nv = Decimal(n["value"])
-    dv = Decimal(d["value"])
+    nv = _to_decimal(n["value"])
+    dv = _to_decimal(d["value"])
     if dv == 0:
         raise DivisionByZero(f"denominator='{denominator}' is zero for period={period}")
     r = nv / dv
@@ -133,6 +179,7 @@ def calculate_ratio(conn: duckdb.DuckDBPyConnection, entity_id: str | int, numer
         "ratio": str(r),
         "ratio_pct": str(r * Decimal("100")),
         "citations": [n["citation"], d["citation"]],
+        "display_hint": unit_out,
     }
 
 
@@ -148,30 +195,57 @@ def list_sources(conn: duckdb.DuckDBPyConnection, entity_id: str | int, metric: 
     ).fetchall()
     if not rows:
         raise MetricNotFound(f"no sources for metric='{metric}' period='{period}'")
-    return {"entity_id": eid, "metric": metric, "period": period, "sources": [
-        {"fact_id": r[0], "filename": r[1], "file_path": r[2], "source_file_id": r[3], "source_sheet": r[4], "cell_reference": r[5]}
-        for r in rows
-    ]}
+    return {
+        "entity_id": eid,
+        "metric": metric,
+        "period": period,
+        "sources": [
+            {
+                "fact_id": r[0],
+                "filename": r[1],
+                "file_path": r[2],
+                "source_file_id": r[3],
+                "source_sheet": r[4],
+                "cell_reference": r[5],
+            }
+            for r in rows
+        ],
+    }
 
 
 def list_available_metrics(conn: duckdb.DuckDBPyConnection, entity_id: str | int) -> dict:
     eid = _resolve_entity_id(conn, entity_id)
     rows = conn.execute(
-        "SELECT canonical_field, COUNT(*) AS n FROM live_facts WHERE entity_id = ? GROUP BY canonical_field ORDER BY canonical_field",
+        """
+        SELECT canonical_field, COUNT(*) AS n
+        FROM live_facts
+        WHERE entity_id = ?
+        GROUP BY canonical_field
+        ORDER BY canonical_field
+        """,
         [eid],
     ).fetchall()
     return {"entity_id": eid, "metrics": [{"metric": r[0], "observations": r[1]} for r in rows]}
 
 
-def search_context(conn: duckdb.DuckDBPyConnection, entity_id: str | int, query: str, period_filter: Optional[str] = None, metric_filter: Optional[str] = None) -> dict:
+def search_context(
+    conn: duckdb.DuckDBPyConnection,
+    entity_id: str | int,
+    query: str,
+    period_filter: Optional[str] = None,
+    metric_filter: Optional[str] = None,
+) -> dict:
     eid = _resolve_entity_id(conn, entity_id)
     chunks = get_qualitative_chunks(conn, eid)
     by_doc_id = {c.get("chroma_document_id"): c for c in chunks if c.get("chroma_document_id")}
+
     if period_filter:
         chunks = [c for c in chunks if period_filter.lower() in (c.get("linked_periods") or "").lower()]
     if metric_filter:
         chunks = [c for c in chunks if metric_filter.lower() in (c.get("linked_metrics") or "").lower()]
+
     top = []
+    used_fallback = False
     try:
         client = _get_chroma_client()
         col_rows = conn.execute(
@@ -186,6 +260,7 @@ def search_context(conn: duckdb.DuckDBPyConnection, entity_id: str | int, query:
                 if doc_id in by_doc_id:
                     top.append(by_doc_id[doc_id])
     except Exception:
+        used_fallback = True
         query_terms = [t for t in query.lower().split() if len(t) > 2]
         scored = []
         for c in chunks:
@@ -195,17 +270,35 @@ def search_context(conn: duckdb.DuckDBPyConnection, entity_id: str | int, query:
                 scored.append((score, c))
         scored.sort(key=lambda x: x[0], reverse=True)
         top = [c for _, c in scored[:8]]
-    return {
-        "entity_id": eid,
-        "query": query,
-        "results": [
+
+    results = []
+    for c in top:
+        linked = c.get("linked_fact_ids")
+        if isinstance(linked, str):
+            try:
+                linked = json.loads(linked or "[]")
+            except json.JSONDecodeError:
+                linked = []
+
+        results.append(
             {
                 "chunk_id": c["chunk_id"],
                 "section_path": c.get("section_path"),
                 "contains_numerical_claim": c.get("contains_numerical_claim", False),
-                "raw_text": c.get("raw_text", "")[:600],
-                "linked_fact_ids": json.loads(c.get("linked_fact_ids") or "[]") if isinstance(c.get("linked_fact_ids"), str) else c.get("linked_fact_ids"),
+                "raw_text": (c.get("raw_text") or "")[:600],
+                "linked_fact_ids": linked,
+                "citation": {
+                    "source_file_id": c.get("file_id"),
+                    "chunk_id": c.get("chunk_id"),
+                },
             }
-            for c in top
-        ],
+        )
+
+    return {
+        "entity_id": eid,
+        "query": query,
+        "period_filter": period_filter,
+        "metric_filter": metric_filter,
+        "search_mode": "keyword_fallback" if used_fallback else "chroma_similarity",
+        "results": results,
     }
